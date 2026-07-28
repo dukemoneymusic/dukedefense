@@ -381,9 +381,35 @@ function boot(port, attemptsLeft) {
     console.log('  Co-op: up to ' + MAX_PLAYERS + ' players per room.');
     if (port !== PORT) console.log('  (port ' + PORT + ' was busy, using ' + port + ' instead)');
     console.log('');
+    keepAwake();
   });
 
   server.listen(port, HOST);
+}
+
+/* ============================================================
+   KEEP-AWAKE
+   Free hosts (Render's free plan, etc.) put a service to sleep
+   after ~15 minutes with no inbound traffic, so the first player
+   back has to wait for a cold start. While we're running we ping
+   our own public URL every 10 minutes — that inbound request
+   resets the idle timer, so the service just never sleeps and the
+   link is effectively always-on. Costs nothing and stays well
+   inside the free monthly hours for a single service.
+
+   Render injects RENDER_EXTERNAL_URL. Any other host can enable
+   this by setting SELF_URL to the public https address.
+   ============================================================ */
+let keepAwakeStarted = false;
+function keepAwake() {
+  if (keepAwakeStarted) return;
+  const url = (process.env.RENDER_EXTERNAL_URL || process.env.SELF_URL || '').replace(/\/+$/, '');
+  if (!url || typeof fetch !== 'function') return;
+  keepAwakeStarted = true;
+  console.log('  Keep-awake: pinging ' + url + '/health every 10 min so it never sleeps.');
+  setInterval(() => {
+    fetch(url + '/health').catch(() => {});     /* an inbound hit resets the idle timer */
+  }, 10 * 60 * 1000);
 }
 
 boot(PORT, PORT_FROM_ENV ? 0 : 20);
