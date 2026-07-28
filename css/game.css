@@ -164,7 +164,7 @@ html,body{
 
 .ability{
   position:relative; overflow:hidden;
-  width:104px; height:62px;
+  width:96px; height:50px;
   border-radius:var(--r-md);
   border:1px solid var(--line);
   background:linear-gradient(180deg,#1e2738,#0e1420);
@@ -202,7 +202,7 @@ html,body{
 #wavepips i.boss.done{ background:#6b2430; }
 
 .nextwave{
-  height:56px; padding:0 22px;
+  height:50px; padding:0 20px;
   border-radius:var(--r-md);
   border:1px solid #2f6b4c;
   background:linear-gradient(180deg,#1f8f5c,#116038);
@@ -511,7 +511,7 @@ kbd{
 
 .wpn{
   position:relative; flex:0 0 auto;
-  width:70px; height:66px;
+  width:62px; height:54px;
   border-radius:9px;
   border:1px solid var(--line);
   background:linear-gradient(180deg,#1c2434,#0e1420);

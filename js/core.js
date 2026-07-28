@@ -10,7 +10,17 @@
    VIEW_* is the logical canvas resolution — it follows the window's aspect
    ratio so a phone held upright gets a tall viewport instead of a letterboxed
    strip. Recomputed by setViewport() on every resize/rotate. */
-const WORLD_W = 2560, WORLD_H = 1440;
+/* Solo runs on the base board; co-op gets a much larger battlefield so four
+   players have room to spread out and hold different approaches. The size is
+   chosen before a level loads (setWorldSize) and everything that bakes or
+   scales reads WORLD_W/WORLD_H live. */
+const BASE_WORLD_W = 2560, BASE_WORLD_H = 1440;
+const COOP_WORLD_W = 3456, COOP_WORLD_H = 1944;     /* 1.35x linear, ~1.8x area */
+let WORLD_W = BASE_WORLD_W, WORLD_H = BASE_WORLD_H;
+function setWorldSize(coop) {
+  WORLD_W = coop ? COOP_WORLD_W : BASE_WORLD_W;
+  WORLD_H = coop ? COOP_WORLD_H : BASE_WORLD_H;
+}
 let VIEW_W = 1600, VIEW_H = 900;
 
 /* Pick a logical resolution matching the window's shape. The long edge is
@@ -243,13 +253,29 @@ function makeCamera() {
   return {
     x: 0, y: 0, z: 1,
     tx: 0, ty: 0, tz: 1,               /* targets, for smoothing */
+    padT: 0, padB: 0,                  /* HUD / dock insets, screen px */
     minZ: Math.max(VIEW_W / WORLD_W, VIEW_H / WORLD_H),
     maxZ: 2.6,
 
-    /* the window changed shape: recompute how far out we may zoom */
+    /* the strip of screen the board actually gets to live in, once the
+       HUD (top) and dock (bottom) have taken their bite. World is fit and
+       positioned into THIS, so nothing important ever hides behind a bar. */
+    usableH() { return Math.max(120, VIEW_H - this.padT - this.padB); },
+
+    setPads(top, bottom) {
+      this.padT = top || 0;
+      this.padB = bottom || 0;
+      this.refit();
+    },
+    refit() {
+      this.minZ = Math.max(VIEW_W / WORLD_W, this.usableH() / WORLD_H);
+      if (this.tz < this.minZ) this.tz = this.minZ;
+      this.clamp();
+    },
+
     updateViewport() {
       const wasMin = Math.abs(this.tz - this.minZ) < 0.001;
-      this.minZ = Math.max(VIEW_W / WORLD_W, VIEW_H / WORLD_H);
+      this.minZ = Math.max(VIEW_W / WORLD_W, this.usableH() / WORLD_H);
       if (wasMin || this.tz < this.minZ) this.tz = this.minZ;
       this.clamp();
       this.z = this.tz;
@@ -257,17 +283,17 @@ function makeCamera() {
 
     clamp() {
       this.tz = U.clamp(this.tz, this.minZ, this.maxZ);
-      const vw = VIEW_W / this.tz, vh = VIEW_H / this.tz;
+      const vw = VIEW_W / this.tz, vh = this.usableH() / this.tz;
       this.tx = U.clamp(this.tx, 0, Math.max(0, WORLD_W - vw));
       this.ty = U.clamp(this.ty, 0, Math.max(0, WORLD_H - vh));
     },
     /* keep the world point under the cursor pinned while zooming */
     zoomAt(sx, sy, factor) {
       const wx = this.tx + sx / this.tz;
-      const wy = this.ty + sy / this.tz;
+      const wy = this.ty + (sy - this.padT) / this.tz;
       this.tz = U.clamp(this.tz * factor, this.minZ, this.maxZ);
       this.tx = wx - sx / this.tz;
-      this.ty = wy - sy / this.tz;
+      this.ty = wy - (sy - this.padT) / this.tz;
       this.clamp();
     },
     panBy(dxScreen, dyScreen) {
@@ -277,7 +303,7 @@ function makeCamera() {
     },
     centerOn(wx, wy) {
       this.tx = wx - (VIEW_W / this.tz) / 2;
-      this.ty = wy - (VIEW_H / this.tz) / 2;
+      this.ty = wy - (this.usableH() / this.tz) / 2;
       this.clamp();
       this.x = this.tx; this.y = this.ty; this.z = this.tz;
     },
@@ -287,15 +313,16 @@ function makeCamera() {
       this.y += (this.ty - this.y) * k;
       this.z += (this.tz - this.z) * k;
     },
-    toWorld(sx, sy) { return { x: this.x + sx / this.z, y: this.y + sy / this.z }; },
-    toScreen(wx, wy) { return { x: (wx - this.x) * this.z, y: (wy - this.y) * this.z }; },
-    /* generous cull box so tall buildings and flyers don't pop */
+    /* screen y is measured from the top of the window; the board is
+       rendered starting at padT, so both mappings carry that offset. */
+    toWorld(sx, sy) { return { x: this.x + sx / this.z, y: this.y + (sy - this.padT) / this.z }; },
+    toScreen(wx, wy) { return { x: (wx - this.x) * this.z, y: (wy - this.y) * this.z + this.padT }; },
     visible(pad) {
       pad = pad || 0;
       return {
         x0: this.x - pad, y0: this.y - pad,
         x1: this.x + VIEW_W / this.z + pad,
-        y1: this.y + VIEW_H / this.z + pad
+        y1: this.y + this.usableH() / this.z + pad
       };
     }
   };

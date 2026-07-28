@@ -1604,6 +1604,7 @@ const Render = (() => {
     x.clearRect(0, 0, W, H);
 
     x.save();
+    x.translate(0, cam.padT);          /* board lives below the HUD, above the dock */
     x.scale(cam.z, cam.z);
     x.translate(-cam.x, -cam.y);
     const vis = cam.visible(240);
@@ -1947,7 +1948,7 @@ const Render = (() => {
     /* viewport box */
     const cam = G.cam;
     x.strokeStyle = U.rgba(255, 255, 255, .75); x.lineWidth = 1.4;
-    x.strokeRect(cam.x * sx, cam.y * sy, (VIEW_W / cam.z) * sx, (VIEW_H / cam.z) * sy);
+    x.strokeRect(cam.x * sx, cam.y * sy, (VIEW_W / cam.z) * sx, (cam.usableH() / cam.z) * sy);
     x.restore();
     x.restore();
   }

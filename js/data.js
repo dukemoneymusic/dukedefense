@@ -233,16 +233,21 @@ function makeWaves(idx, count, pool, boss, opts) {
   /* Every district hands the player a fresh wallet, so wave 1 has to stay
      beatable with tier-1 towers. District difficulty comes from the roster
      (gators and golems show up early later on), extra lanes and more waves
-     — NOT from multiplying turn-one hit points into the stratosphere. */
-  const tier = 1 + idx * 0.075;
+     — NOT from multiplying turn-one hit points into the stratosphere.
+
+     DIFFICULTY is the one dial for the whole game: it lifts hit points and
+     the wave-strength ramp everywhere. Wave 1 stays winnable; the middle and
+     back of every district hit a lot harder than they used to. */
+  const DIFFICULTY = 1.32;
+  const tier = 1 + idx * 0.095;
   const nPaths = opts.paths || 1;
 
   for (let w = 0; w < count; w++) {
     const p = count > 1 ? w / (count - 1) : 0;
     const isBoss = (w === count - 1) && !!boss;
     const isMini = !isBoss && count > 8 && w === Math.floor(count * .55);
-    const hpMul = tier * (0.68 + p * 1.55);
-    const spdMul = 1 + p * 0.13 + idx * 0.006;
+    const hpMul = tier * (0.70 + p * 1.95) * DIFFICULTY;
+    const spdMul = 1 + p * 0.15 + idx * 0.008;
     /* Two or three lanes means each tower covers half or a third as much
        of the assault, so the same head-count is roughly twice the fight. */
     const laneFactor = 1 / (0.62 + 0.38 * nPaths);
@@ -280,7 +285,7 @@ function makeWaves(idx, count, pool, boss, opts) {
 
         const def = ENEMIES[chosen.t];
         const bulk = def.hp < 60 ? 1.9 : (def.hp < 200 ? 1.0 : 0.45);
-        const n = Math.max(2, Math.round((3 + p * 13 + idx * .55) * bulk * (chosen.n || 1) * (isMini ? 1.5 : 1) * laneFactor));
+        const n = Math.max(2, Math.round((3 + p * 16 + idx * .7) * bulk * (chosen.n || 1) * (isMini ? 1.5 : 1) * laneFactor));
         groups.push({
           type: chosen.t,
           count: n,
@@ -307,48 +312,61 @@ function makeWaves(idx, count, pool, boss, opts) {
 /* ==========================================================
    LEVEL CONSTRUCTION HELPERS
    ========================================================== */
-/* Layouts were authored against a 1600x900 board. The battlefield is
-   now WORLD_W x WORLD_H, so everything spatial gets scaled up on the
-   way in — routes get longer, blocks get further apart, and there is
-   real estate to actually manoeuvre weapons around. */
-const SCALE_X = WORLD_W / 1600;
-const SCALE_Y = WORLD_H / 900;
-const SCALE   = Math.min(SCALE_X, SCALE_Y);
-
+/* Layouts are authored against a 1600x900 board and scaled up to whatever
+   the current battlefield size is (which differs between solo and co-op).
+   The raw coords are kept so a level can be re-scaled each time it loads
+   at a different world size — routes get longer, blocks further apart, and
+   there is real estate to manoeuvre weapons around. */
 function mkLevel(cfg) {
   /* extra lanes mean extra opening capital and a little more slack */
   cfg.gold += (cfg.paths.length - 1) * 150;
   cfg.lives += (cfg.paths.length - 1) * 3;
 
-  /* --- scale the layout up to the real board --- */
-  cfg.paths = cfg.paths.map(p => p.map(w => ({ x: w.x * SCALE_X, y: w.y * SCALE_Y })));
-  if (cfg.landmark) {
-    cfg.landmark.x *= SCALE_X; cfg.landmark.y *= SCALE_Y;
-    cfg.landmark.s = (cfg.landmark.s || 1) * SCALE;
-    cfg.landmark.clear = (cfg.landmark.clear || 260) * SCALE;
-  }
-  (cfg.props || []).forEach(p => {
-    p.x *= SCALE_X; p.y *= SCALE_Y;
-    if (p.t === 'tree') p.s = (p.s || 26) * SCALE; else p.s = (p.s || 1) * SCALE;
-    if (p.len) p.len *= SCALE;
-  });
-  (cfg.lights || []).forEach(l => { l.x *= SCALE_X; l.y *= SCALE_Y; l.r = (l.r || 130) * SCALE; });
-  (cfg.keepClear || []).forEach(k => { k.x *= SCALE_X; k.y *= SCALE_Y; k.r *= SCALE; });
-  cfg.roadW = Math.round((cfg.roadW || 64) * SCALE);
-  cfg.cityDensity = Math.round((cfg.cityDensity === undefined ? 46 : cfg.cityDensity) * 2.1);
-
-  cfg.builtPaths = cfg.paths.map(p => U.buildPath(p, 5));
-  const last = cfg.paths[0][cfg.paths[0].length - 1];
-  cfg.base = cfg.base || { x: last.x, y: last.y };
-  delete cfg.padSpec;
-
+  /* size-independent, computed once */
   cfg.waves = makeWaves(cfg.id, cfg.waveCount, cfg.pool, cfg.boss, { paths: cfg.paths.length });
   cfg.threats = [];
   const seen = {};
   cfg.waves.forEach(w => w.groups.forEach(g => { if (!seen[g.type]) { seen[g.type] = 1; cfg.threats.push(g.type); } }));
 
-  /* where the camera opens: on the apple */
-  cfg.startView = { x: cfg.base.x, y: cfg.base.y };
+  /* stash the authored (1600x900) geometry so we can rescale on demand */
+  cfg._raw = {
+    paths: cfg.paths.map(p => p.map(w => ({ x: w.x, y: w.y }))),
+    landmark: cfg.landmark ? Object.assign({}, cfg.landmark) : null,
+    props: (cfg.props || []).map(p => Object.assign({}, p)),
+    lights: (cfg.lights || []).map(l => Object.assign({}, l)),
+    keepClear: (cfg.keepClear || []).map(k => Object.assign({}, k)),
+    roadW: cfg.roadW || 64,
+    density: cfg.cityDensity === undefined ? 46 : cfg.cityDensity
+  };
+  delete cfg.padSpec;
+
+  /* rebuild everything spatial for the current WORLD_W/WORLD_H */
+  cfg.rescale = function () {
+    const sx = WORLD_W / 1600, sy = WORLD_H / 900, s = Math.min(sx, sy);
+    const raw = cfg._raw;
+    cfg.paths = raw.paths.map(p => p.map(w => ({ x: w.x * sx, y: w.y * sy })));
+    cfg.landmark = raw.landmark ? Object.assign({}, raw.landmark, {
+      x: raw.landmark.x * sx, y: raw.landmark.y * sy,
+      s: (raw.landmark.s || 1) * s, clear: (raw.landmark.clear || 260) * s
+    }) : null;
+    cfg.props = raw.props.map(p => Object.assign({}, p, {
+      x: p.x * sx, y: p.y * sy,
+      s: (p.t === 'tree' ? (p.s || 26) : (p.s || 1)) * s,
+      len: p.len ? p.len * s : p.len
+    }));
+    cfg.lights = raw.lights.map(l => Object.assign({}, l, { x: l.x * sx, y: l.y * sy, r: (l.r || 130) * s }));
+    cfg.keepClear = raw.keepClear.map(k => Object.assign({}, k, { x: k.x * sx, y: k.y * sy, r: k.r * s }));
+    cfg.roadW = Math.round(raw.roadW * s);
+    /* buildings scale with area so a bigger board never looks sparse
+       (0.82 keeps the base board matching its original ~2.1x count) */
+    cfg.cityDensity = Math.round(raw.density * sx * sy * 0.82);
+    cfg.builtPaths = cfg.paths.map(p => U.buildPath(p, 5));
+    const last = cfg.paths[0][cfg.paths[0].length - 1];
+    cfg.base = { x: last.x, y: last.y };
+    cfg.startView = { x: cfg.base.x, y: cfg.base.y };
+    cfg.mask = null;                    /* force a re-bake of the placement grid */
+  };
+  cfg.rescale();
   return cfg;
 }
 
@@ -778,7 +796,10 @@ const LEVELS = [
 
 /* Coney gets a second landmark drawn manually at bake time.
    Authored in the original 1600x900 space, so scale it like everything else. */
-LEVELS[5].onExtra = (x) => ART.LAND.coaster(x, 1080 * SCALE_X, 320 * SCALE_Y, SCALE, LEVELS[5].night);
+LEVELS[5].onExtra = (x) => {
+  const sx = WORLD_W / 1600, sy = WORLD_H / 900, s = Math.min(sx, sy);
+  ART.LAND.coaster(x, 1080 * sx, 320 * sy, s, LEVELS[5].night);
+};
 
 
 /* ==========================================================

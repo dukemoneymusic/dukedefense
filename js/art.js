@@ -17,18 +17,25 @@
 
 const ART = (() => {
 
-  const W = WORLD_W, H = WORLD_H;
-  /* The camera hangs over a point BELOW the frame. Every volume therefore
-     leans the same way — up and slightly outward — so each building shows
-     the wall that faces the viewer and nothing ever grows downward over
-     the street it sits behind. */
-  const NADIR_X = W / 2, NADIR_Y = H + 460;
+  /* These follow the live world size, which changes between solo and co-op.
+     syncSize() refreshes them at the start of every bake so a bigger co-op
+     board projects and masks correctly. */
+  let W = WORLD_W, H = WORLD_H;
+  let NADIR_X = W / 2, NADIR_Y = H + 460;
   const SPREAD  = 0.00030;              /* how hard walls lean out */
   const RISE    = 0.52;                 /* screen px per world height unit */
 
   /* placement mask granularity */
   const CELL = 16;
-  const GW = Math.ceil(W / CELL), GH = Math.ceil(H / CELL);
+  let GW = Math.ceil(W / CELL), GH = Math.ceil(H / CELL);
+
+  function syncSize() {
+    W = WORLD_W; H = WORLD_H;
+    NADIR_X = W / 2;
+    NADIR_Y = H + Math.round(H * 0.319);   /* nadir sits ~0.32H below the frame */
+    GW = Math.ceil(W / CELL);
+    GH = Math.ceil(H / CELL);
+  }
 
   const N = U.makeNoise(9137);
 
@@ -1571,6 +1578,7 @@ const ART = (() => {
        glow    — additive layer for practical lights
      ========================================================== */
   function bake(L, onProgress) {
+    syncSize();
     const g = U.surface(W, H);
     const x = g.x;
     const r = U.rng(L.buildSeed);
@@ -1783,6 +1791,7 @@ const ART = (() => {
 
   /* ---- night lighting layer, rebuilt per level ---- */
   function bakeLights(L) {
+    syncSize();
     const s = U.surface(W, H);
     const x = s.x;
     if (L.night <= .05) return null;
@@ -1831,6 +1840,7 @@ const ART = (() => {
 
   /* additive practical glow layer */
   function bakeGlow(L) {
+    syncSize();
     const s = U.surface(W, H);
     const x = s.x;
     if (L.night <= .05) return null;

@@ -16,7 +16,8 @@ const PICKUP_KIND = ['cash', 'medkit', 'ammo'];
 
 const Game = (() => {
 
-  const W = WORLD_W, H = WORLD_H;
+  /* world size changes between solo and co-op, so read it live */
+  const W = () => WORLD_W, H = () => WORLD_H;
   let G = null;
   let uid = 1;
 
@@ -26,6 +27,11 @@ const Game = (() => {
   function load(levelIndex, onProgress, done, opts) {
     opts = opts || {};
     const L = LEVELS[levelIndex];
+
+    /* pick the board size for this mode, then rebuild the level's geometry
+       for it — must happen before anything bakes or the camera is made */
+    setWorldSize(!!opts.coop);
+    L.rescale();
 
     const steps = [
       () => { G = fresh(L, opts); onProgress(.05, 'SURVEYING THE GROUND'); },
@@ -39,7 +45,7 @@ const Game = (() => {
       () => { G.lights = ART.bakeLights(L); onProgress(.76, 'KILLING THE LIGHTS'); },
       () => { G.glow = ART.bakeGlow(L); onProgress(.86, 'WIRING THE GRID'); },
       () => {
-        const d = U.surface(W, H);
+        const d = U.surface(W(), H());
         G.decals = d.c; G.decalsCtx = d.x;
         Render.initWeather(L.weather);
         G.cam.centerOn(L.base.x, L.base.y);
@@ -292,8 +298,8 @@ const Game = (() => {
     for (let k = 0; k < 8; k++) {
       if (ART.canPlace(G.level, px, py, 8)) break;
       const a = G.rng() * U.TAU;
-      px = U.clamp(x + Math.cos(a) * (30 + k * 12), 30, W - 30);
-      py = U.clamp(y + Math.sin(a) * (30 + k * 12), 30, H - 30);
+      px = U.clamp(x + Math.cos(a) * (30 + k * 12), 30, W() - 30);
+      py = U.clamp(y + Math.sin(a) * (30 + k * 12), 30, H() - 30);
     }
     G.pickups.push({ id: uid++, kind, value: value || 30, x: px, y: py, life: 15, seed: G.rng() * 10 });
     if (G.pickups.length > 26) G.pickups.shift();
@@ -690,7 +696,7 @@ const Game = (() => {
     if (G.decalCount > 300) {
       const c = G.decalsCtx;
       c.save(); c.globalCompositeOperation = 'destination-out';
-      c.fillStyle = U.rgba(0, 0, 0, .35); c.fillRect(0, 0, W, H);
+      c.fillStyle = U.rgba(0, 0, 0, .35); c.fillRect(0, 0, W(), H());
       c.restore();
       G.decalCount = 160;
     }
@@ -836,7 +842,7 @@ const Game = (() => {
     if (G.crateTimer <= 0 && G.state === 'live') {
       G.crateTimer = 20 + G.rng() * 16;
       for (let k = 0; k < 14; k++) {
-        const px = 120 + G.rng() * (W - 240), py = 120 + G.rng() * (H - 240);
+        const px = 120 + G.rng() * (W() - 240), py = 120 + G.rng() * (H() - 240);
         if (ART.canPlace(G.level, px, py, 14)) {
           const roll = G.rng();
           dropPickup(px, py, roll < .6 ? 'cash' : (roll < .85 ? 'ammo' : 'medkit'),
@@ -1037,7 +1043,7 @@ const Game = (() => {
       }
       p.x += p.vx * dt; p.y += p.vy * dt;
 
-      if (p.x < -80 || p.x > W + 80 || p.y < -80 || p.y > H + 80) { G.projectiles.splice(i, 1); continue; }
+      if (p.x < -80 || p.x > W() + 80 || p.y < -80 || p.y > H() + 80) { G.projectiles.splice(i, 1); continue; }
 
       let hit = null;
       for (const e of G.enemies) {

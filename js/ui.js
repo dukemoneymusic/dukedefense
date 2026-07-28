@@ -70,6 +70,10 @@
       ? hud.getBoundingClientRect().height * px2logical : 20;
     Render.setInset({ bottom, top });
 
+    /* the camera fits the board into the space BETWEEN the bars, so the
+       full playfield is reachable without anything hiding under the UI */
+    if (G && G.cam) G.cam.setPads(top, bottom);
+
     /* park the zoom cluster just above the minimap */
     const mm = Render.minimapRect();
     const z = $('#zoomctl');
