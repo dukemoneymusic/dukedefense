@@ -312,11 +312,45 @@ function makeWaves(idx, count, pool, boss, opts) {
 /* ==========================================================
    LEVEL CONSTRUCTION HELPERS
    ========================================================== */
-/* Layouts are authored against a 1600x900 board and scaled up to whatever
-   the current battlefield size is (which differs between solo and co-op).
-   The raw coords are kept so a level can be re-scaled each time it loads
-   at a different world size — routes get longer, blocks further apart, and
-   there is real estate to manoeuvre weapons around. */
+/* MORE PASSWAY: give every long straight in a route a gentle serpentine so
+   enemies cover noticeably more ground before the apple, without moving the
+   entry points or the apple itself. Buildings are placed after routes and
+   simply avoid them, so a windier road just means a windier road. Authored
+   in 1600x900 space; the endpoints (spawn + apple) are never displaced. */
+function windPath(pts) {
+  if (pts.length < 2) return pts.map(w => ({ x: w.x, y: w.y }));
+  /* How much passway does this route already have? A route that's straight
+     (ratio near 1) gets a lot of serpentine added; one that already snakes
+     around (Central Park, the Ramble) is left alone so it never turns into
+     spaghetti. Everything lands around a consistent target. */
+  let len = 0;
+  for (let i = 0; i < pts.length - 1; i++) len += Math.hypot(pts[i + 1].x - pts[i].x, pts[i + 1].y - pts[i].y);
+  const straight = Math.hypot(pts[pts.length - 1].x - pts[0].x, pts[pts.length - 1].y - pts[0].y) || 1;
+  const TARGET = 2.0;
+  const deficit = Math.max(0, TARGET - len / straight);
+  if (deficit < 0.15) return pts.map(w => ({ x: w.x, y: w.y }));
+  const k = Math.min(0.24, deficit * 0.24);
+
+  const out = [{ x: pts[0].x, y: pts[0].y }];
+  for (let i = 0; i < pts.length - 1; i++) {
+    const a = pts[i], b = pts[i + 1];
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const L = Math.hypot(dx, dy);
+    if (L > 110) {
+      const nx = -dy / L, ny = dx / L;                /* unit perpendicular */
+      const amp = Math.min(L * k, 105);
+      const sign = (i % 2 === 0) ? 1 : -1;            /* alternate = serpentine */
+      out.push({ x: a.x + dx * 0.33 + nx * amp * sign, y: a.y + dy * 0.33 + ny * amp * sign });
+      out.push({ x: a.x + dx * 0.66 - nx * amp * sign, y: a.y + dy * 0.66 - ny * amp * sign });
+    }
+    out.push({ x: b.x, y: b.y });
+  }
+  return out.map(p => ({ x: U.clamp(p.x, 30, 1570), y: U.clamp(p.y, 30, 870) }));
+}
+
+/* Layouts are authored against a 1600x900 board and scaled to the current
+   world size on load. Raw coords are kept so a level can be rebuilt spatially
+   without losing the original geometry. */
 function mkLevel(cfg) {
   /* extra lanes mean extra opening capital and a little more slack */
   cfg.gold += (cfg.paths.length - 1) * 150;
@@ -330,7 +364,7 @@ function mkLevel(cfg) {
 
   /* stash the authored (1600x900) geometry so we can rescale on demand */
   cfg._raw = {
-    paths: cfg.paths.map(p => p.map(w => ({ x: w.x, y: w.y }))),
+    paths: cfg.paths.map(p => windPath(p)),
     landmark: cfg.landmark ? Object.assign({}, cfg.landmark) : null,
     props: (cfg.props || []).map(p => Object.assign({}, p)),
     lights: (cfg.lights || []).map(l => Object.assign({}, l)),

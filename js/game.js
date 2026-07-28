@@ -86,6 +86,7 @@ const Game = (() => {
       shake: 0, shakeX: 0, shakeY: 0,
       decalCount: 0,
       crateTimer: 16,
+      shotLog: [],                          /* host records shots so clients can draw bullets */
 
       /* your own weapon */
       sidearmCool: 0, sidearmMax: 0.42, sidearmDmg: 24,
@@ -593,6 +594,14 @@ const Game = (() => {
 
     t.recoil = 1; t.flash = 1;
     if (def.sfx) Audio2.play(def.sfx, def.proj === 'bullet' ? 28 : 45);
+
+    /* host logs the shot (tower -> where it aimed) so every client can draw a
+       bullet for it — clients don't run the sim, so this is how they see fire */
+    if (G.netRole === 'host') {
+      const ty2 = target.y - (target.fly ? 28 : 0);
+      G.shotLog.push([t.id, Math.round(target.x), Math.round(ty2)]);
+      if (G.shotLog.length > 80) G.shotLog.shift();
+    }
   }
 
   function ejectBrass(t) {
@@ -1106,7 +1115,7 @@ const Game = (() => {
      NETPLAY — snapshots
      ========================================================== */
   function makeSnapshot() {
-    return {
+    const snap = {
       k: G.tick, g: Math.round(G.gold), l: G.lives,
       wi: G.waveIdx, ws: G.wavesSent, wt: +G.waveTimer.toFixed(2),
       st: G.state, sp: G.speed, tm: +G.time.toFixed(2),
@@ -1123,8 +1132,11 @@ const Game = (() => {
         t.id, TOWER_KEYS.indexOf(t.type), Math.round(t.x), Math.round(t.y),
         t.tier, +t.aim.toFixed(2), t.owner, t.mode, +t.charge.toFixed(2)
       ]),
-      p: G.pickups.map(p => [p.id, PICKUP_KIND.indexOf(p.kind), Math.round(p.x), Math.round(p.y), +p.life.toFixed(1), p.value])
+      p: G.pickups.map(p => [p.id, PICKUP_KIND.indexOf(p.kind), Math.round(p.x), Math.round(p.y), +p.life.toFixed(1), p.value]),
+      sh: G.shotLog                          /* shots fired since the last snapshot */
     };
+    G.shotLog = [];                          /* snap keeps the old array; start a fresh one */
+    return snap;
   }
 
   function applySnapshot(s) {
@@ -1221,6 +1233,27 @@ const Game = (() => {
       else p.life = row[4];
     }
     for (let i = G.pickups.length - 1; i >= 0; i--) if (!pseen[G.pickups[i].id]) G.pickups.splice(i, 1);
+
+    /* draw a bullet for every shot the host reported since the last snapshot */
+    if (s.sh && s.sh.length) {
+      for (const shot of s.sh) {
+        const tw = G.towers.find(v => v.id === shot[0]);
+        if (!tw) continue;
+        const tx = shot[1], ty = shot[2];
+        const a = Math.atan2(ty - (tw.y - 14), tx - tw.x);
+        const heavy = tw.def && /he|drop|arc|homing|wave|chain/.test(tw.def.proj);
+        G.projectiles.push({
+          cosmetic: true, kind: 'bullet',
+          x: tw.x, y: tw.y - 14, a,
+          vx: Math.cos(a) * (heavy ? 620 : 1050), vy: Math.sin(a) * (heavy ? 620 : 1050),
+          gx: tx, gy: ty, life: 1.0,
+          col: (tw.def && tw.def.dtype === 'ap') ? '#fff6d0' : (tw.def ? U.mix(tw.def.col, '#ffe6a0', .5) : '#ffd88a'),
+          tracer: 18
+        });
+        tw.recoil = 1; tw.flash = 1;
+        if (tw.def && tw.def.sfx) Audio2.play(tw.def.sfx, tw.def.proj === 'bullet' ? 40 : 60);
+      }
+    }
   }
 
   /* clients advance visuals only and slide entities toward the last snapshot */
@@ -1247,6 +1280,20 @@ const Game = (() => {
       G.pickups[i].life -= rawDt;
       if (G.pickups[i].life <= 0) G.pickups.splice(i, 1);
     }
+
+    /* fly the cosmetic bullets toward where the host aimed; pop on arrival */
+    for (let i = G.projectiles.length - 1; i >= 0; i--) {
+      const p = G.projectiles[i];
+      p.life -= rawDt;
+      p.x += p.vx * rawDt; p.y += p.vy * rawDt;
+      const reached = p.gx !== undefined &&
+        ((p.x - p.gx) * p.vx + (p.y - p.gy) * p.vy) >= 0;   /* passed the target */
+      if (p.life <= 0 || reached) {
+        burst(p.gx !== undefined ? p.gx : p.x, p.gy !== undefined ? p.gy : p.y, 4, '#ffe6a0', 'spark');
+        G.projectiles.splice(i, 1);
+      }
+    }
+
     stepParticles(rawDt); stepFloats(rawDt); stepShake(rawDt);
   }
 

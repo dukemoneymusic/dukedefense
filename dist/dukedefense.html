@@ -1025,12 +1025,16 @@ window.DUKE_SOLO = true;
    players have room to spread out and hold different approaches. The size is
    chosen before a level loads (setWorldSize) and everything that bakes or
    scales reads WORLD_W/WORLD_H live. */
+/* One board size for every mode. Weapon ranges are tuned to this, so scaling
+   the canvas up (as an earlier version did for co-op) left towers unable to
+   reach the road. "A bigger board" is delivered instead as LONGER ROUTES —
+   more road for enemies to cross before the apple — at this fixed size, so
+   ranges and placement behave identically in solo and co-op. */
 const BASE_WORLD_W = 2560, BASE_WORLD_H = 1440;
-const COOP_WORLD_W = 3456, COOP_WORLD_H = 1944;     /* 1.35x linear, ~1.8x area */
 let WORLD_W = BASE_WORLD_W, WORLD_H = BASE_WORLD_H;
 function setWorldSize(coop) {
-  WORLD_W = coop ? COOP_WORLD_W : BASE_WORLD_W;
-  WORLD_H = coop ? COOP_WORLD_H : BASE_WORLD_H;
+  WORLD_W = BASE_WORLD_W;
+  WORLD_H = BASE_WORLD_H;
 }
 let VIEW_W = 1600, VIEW_H = 900;
 
@@ -3965,11 +3969,45 @@ function makeWaves(idx, count, pool, boss, opts) {
 /* ==========================================================
    LEVEL CONSTRUCTION HELPERS
    ========================================================== */
-/* Layouts are authored against a 1600x900 board and scaled up to whatever
-   the current battlefield size is (which differs between solo and co-op).
-   The raw coords are kept so a level can be re-scaled each time it loads
-   at a different world size — routes get longer, blocks further apart, and
-   there is real estate to manoeuvre weapons around. */
+/* MORE PASSWAY: give every long straight in a route a gentle serpentine so
+   enemies cover noticeably more ground before the apple, without moving the
+   entry points or the apple itself. Buildings are placed after routes and
+   simply avoid them, so a windier road just means a windier road. Authored
+   in 1600x900 space; the endpoints (spawn + apple) are never displaced. */
+function windPath(pts) {
+  if (pts.length < 2) return pts.map(w => ({ x: w.x, y: w.y }));
+  /* How much passway does this route already have? A route that's straight
+     (ratio near 1) gets a lot of serpentine added; one that already snakes
+     around (Central Park, the Ramble) is left alone so it never turns into
+     spaghetti. Everything lands around a consistent target. */
+  let len = 0;
+  for (let i = 0; i < pts.length - 1; i++) len += Math.hypot(pts[i + 1].x - pts[i].x, pts[i + 1].y - pts[i].y);
+  const straight = Math.hypot(pts[pts.length - 1].x - pts[0].x, pts[pts.length - 1].y - pts[0].y) || 1;
+  const TARGET = 2.0;
+  const deficit = Math.max(0, TARGET - len / straight);
+  if (deficit < 0.15) return pts.map(w => ({ x: w.x, y: w.y }));
+  const k = Math.min(0.24, deficit * 0.24);
+
+  const out = [{ x: pts[0].x, y: pts[0].y }];
+  for (let i = 0; i < pts.length - 1; i++) {
+    const a = pts[i], b = pts[i + 1];
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const L = Math.hypot(dx, dy);
+    if (L > 110) {
+      const nx = -dy / L, ny = dx / L;                /* unit perpendicular */
+      const amp = Math.min(L * k, 105);
+      const sign = (i % 2 === 0) ? 1 : -1;            /* alternate = serpentine */
+      out.push({ x: a.x + dx * 0.33 + nx * amp * sign, y: a.y + dy * 0.33 + ny * amp * sign });
+      out.push({ x: a.x + dx * 0.66 - nx * amp * sign, y: a.y + dy * 0.66 - ny * amp * sign });
+    }
+    out.push({ x: b.x, y: b.y });
+  }
+  return out.map(p => ({ x: U.clamp(p.x, 30, 1570), y: U.clamp(p.y, 30, 870) }));
+}
+
+/* Layouts are authored against a 1600x900 board and scaled to the current
+   world size on load. Raw coords are kept so a level can be rebuilt spatially
+   without losing the original geometry. */
 function mkLevel(cfg) {
   /* extra lanes mean extra opening capital and a little more slack */
   cfg.gold += (cfg.paths.length - 1) * 150;
@@ -3983,7 +4021,7 @@ function mkLevel(cfg) {
 
   /* stash the authored (1600x900) geometry so we can rescale on demand */
   cfg._raw = {
-    paths: cfg.paths.map(p => p.map(w => ({ x: w.x, y: w.y }))),
+    paths: cfg.paths.map(p => windPath(p)),
     landmark: cfg.landmark ? Object.assign({}, cfg.landmark) : null,
     props: (cfg.props || []).map(p => Object.assign({}, p)),
     lights: (cfg.lights || []).map(l => Object.assign({}, l)),
@@ -6517,6 +6555,7 @@ const Game = (() => {
       shake: 0, shakeX: 0, shakeY: 0,
       decalCount: 0,
       crateTimer: 16,
+      shotLog: [],                          /* host records shots so clients can draw bullets */
 
       /* your own weapon */
       sidearmCool: 0, sidearmMax: 0.42, sidearmDmg: 24,
@@ -7024,6 +7063,14 @@ const Game = (() => {
 
     t.recoil = 1; t.flash = 1;
     if (def.sfx) Audio2.play(def.sfx, def.proj === 'bullet' ? 28 : 45);
+
+    /* host logs the shot (tower -> where it aimed) so every client can draw a
+       bullet for it — clients don't run the sim, so this is how they see fire */
+    if (G.netRole === 'host') {
+      const ty2 = target.y - (target.fly ? 28 : 0);
+      G.shotLog.push([t.id, Math.round(target.x), Math.round(ty2)]);
+      if (G.shotLog.length > 80) G.shotLog.shift();
+    }
   }
 
   function ejectBrass(t) {
@@ -7537,7 +7584,7 @@ const Game = (() => {
      NETPLAY — snapshots
      ========================================================== */
   function makeSnapshot() {
-    return {
+    const snap = {
       k: G.tick, g: Math.round(G.gold), l: G.lives,
       wi: G.waveIdx, ws: G.wavesSent, wt: +G.waveTimer.toFixed(2),
       st: G.state, sp: G.speed, tm: +G.time.toFixed(2),
@@ -7554,8 +7601,11 @@ const Game = (() => {
         t.id, TOWER_KEYS.indexOf(t.type), Math.round(t.x), Math.round(t.y),
         t.tier, +t.aim.toFixed(2), t.owner, t.mode, +t.charge.toFixed(2)
       ]),
-      p: G.pickups.map(p => [p.id, PICKUP_KIND.indexOf(p.kind), Math.round(p.x), Math.round(p.y), +p.life.toFixed(1), p.value])
+      p: G.pickups.map(p => [p.id, PICKUP_KIND.indexOf(p.kind), Math.round(p.x), Math.round(p.y), +p.life.toFixed(1), p.value]),
+      sh: G.shotLog                          /* shots fired since the last snapshot */
     };
+    G.shotLog = [];                          /* snap keeps the old array; start a fresh one */
+    return snap;
   }
 
   function applySnapshot(s) {
@@ -7652,6 +7702,27 @@ const Game = (() => {
       else p.life = row[4];
     }
     for (let i = G.pickups.length - 1; i >= 0; i--) if (!pseen[G.pickups[i].id]) G.pickups.splice(i, 1);
+
+    /* draw a bullet for every shot the host reported since the last snapshot */
+    if (s.sh && s.sh.length) {
+      for (const shot of s.sh) {
+        const tw = G.towers.find(v => v.id === shot[0]);
+        if (!tw) continue;
+        const tx = shot[1], ty = shot[2];
+        const a = Math.atan2(ty - (tw.y - 14), tx - tw.x);
+        const heavy = tw.def && /he|drop|arc|homing|wave|chain/.test(tw.def.proj);
+        G.projectiles.push({
+          cosmetic: true, kind: 'bullet',
+          x: tw.x, y: tw.y - 14, a,
+          vx: Math.cos(a) * (heavy ? 620 : 1050), vy: Math.sin(a) * (heavy ? 620 : 1050),
+          gx: tx, gy: ty, life: 1.0,
+          col: (tw.def && tw.def.dtype === 'ap') ? '#fff6d0' : (tw.def ? U.mix(tw.def.col, '#ffe6a0', .5) : '#ffd88a'),
+          tracer: 18
+        });
+        tw.recoil = 1; tw.flash = 1;
+        if (tw.def && tw.def.sfx) Audio2.play(tw.def.sfx, tw.def.proj === 'bullet' ? 40 : 60);
+      }
+    }
   }
 
   /* clients advance visuals only and slide entities toward the last snapshot */
@@ -7678,6 +7749,20 @@ const Game = (() => {
       G.pickups[i].life -= rawDt;
       if (G.pickups[i].life <= 0) G.pickups.splice(i, 1);
     }
+
+    /* fly the cosmetic bullets toward where the host aimed; pop on arrival */
+    for (let i = G.projectiles.length - 1; i >= 0; i--) {
+      const p = G.projectiles[i];
+      p.life -= rawDt;
+      p.x += p.vx * rawDt; p.y += p.vy * rawDt;
+      const reached = p.gx !== undefined &&
+        ((p.x - p.gx) * p.vx + (p.y - p.gy) * p.vy) >= 0;   /* passed the target */
+      if (p.life <= 0 || reached) {
+        burst(p.gx !== undefined ? p.gx : p.x, p.gy !== undefined ? p.gy : p.y, 4, '#ffe6a0', 'spark');
+        G.projectiles.splice(i, 1);
+      }
+    }
+
     stepParticles(rawDt); stepFloats(rawDt); stepShake(rawDt);
   }
 
