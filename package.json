@@ -1,0 +1,13 @@
+{
+  "name": "dukedefense",
+  "version": "1.0.0",
+  "description": "Tower-defence shooter across fifteen districts of New York City, with 4-player co-op. Zero dependencies.",
+  "private": true,
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=16"
+  }
+}

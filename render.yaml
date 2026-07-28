@@ -1,0 +1,17 @@
+# Deploy DUKE$DEFENSE to Render (https://render.com)
+#
+#   1. push this folder to a Git repo
+#   2. Render -> New -> Blueprint -> point at the repo
+#   3. share the URL it gives you; friends open it and hit CO-OP
+#
+# No build step and no dependencies: the server is Node core only.
+services:
+  - type: web
+    name: dukedefense
+    runtime: node
+    plan: free
+    buildCommand: ""
+    startCommand: node server.js
+    envVars:
+      - key: HOST
+        value: 0.0.0.0

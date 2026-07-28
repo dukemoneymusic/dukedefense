@@ -1,0 +1,8 @@
+# the tunnel tool PLAY-ONLINE.cmd downloads on first run — not part of the game
+cloudflared.exe
+cloudflared
+
+# local noise
+node_modules/
+*.log
+.DS_Store

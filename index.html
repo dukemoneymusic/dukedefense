@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#0a0d14">
+<title>DUKE$DEFENSE</title>
+<link rel="stylesheet" href="css/game.css">
+</head>
+<body>
+
+<div id="app">
+
+  <!-- ==================== GAME FIELD ==================== -->
+  <div id="stage">
+    <canvas id="cv"></canvas>
+
+    <!-- Top HUD -->
+    <div id="hud" class="hidden">
+      <div class="hud-left">
+        <div class="chip chip-life"  title="Bites left on the Apple">
+          <span class="ic">&#127822;</span><span id="hud-lives">20</span>
+        </div>
+        <div class="chip chip-gold" title="Shared funds">
+          <span class="ic">$</span><span id="hud-gold">300</span>
+        </div>
+        <div class="chip chip-wave" title="Wave">
+          <span class="lbl">WAVE</span><span id="hud-wave">1 / 12</span>
+        </div>
+      </div>
+      <div class="hud-center">
+        <div id="hud-district">TIMES SQUARE</div>
+        <div id="hud-sub">MIDTOWN MANHATTAN</div>
+      </div>
+      <div class="hud-right">
+        <div id="squad"></div>
+        <button class="ibtn" id="btn-speed" title="Game speed">1&times;</button>
+        <button class="ibtn" id="btn-pause" title="Pause">&#10073;&#10073;</button>
+        <button class="ibtn" id="btn-sound" title="Sound">&#128266;</button>
+        <button class="ibtn" id="btn-quit" title="Withdraw">&#10005;</button>
+      </div>
+    </div>
+
+    <!-- Bottom: weapon tray + support + next wave -->
+    <div id="dock" class="hidden">
+      <div class="dock-row"><div id="tray"></div></div>
+      <div class="dock-row dock-bottom">
+        <div class="abilities">
+          <button class="ability" id="ab-plow" data-ab="plow">
+            <span class="ab-ic">&#9878;</span><span class="ab-name">SUPPRESS</span>
+            <span class="ab-key">Z</span><span class="ab-cd"></span>
+          </button>
+          <button class="ability" id="ab-freeze" data-ab="freeze">
+            <span class="ab-ic">&#10052;</span><span class="ab-name">CRYO BURST</span>
+            <span class="ab-key">X</span><span class="ab-cd"></span>
+          </button>
+          <button class="ability" id="ab-blast" data-ab="blast">
+            <span class="ab-ic">&#128165;</span><span class="ab-name">AIRSTRIKE</span>
+            <span class="ab-key">C</span><span class="ab-cd"></span>
+          </button>
+        </div>
+        <div class="dock-right">
+          <div id="wavepips"></div>
+          <button id="btn-next" class="nextwave">
+            <span class="nw-main">SEND NEXT WAVE</span>
+            <span class="nw-sub">+<b id="nw-bonus">0</b> early bonus</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div id="zoomctl" class="hidden">
+      <button id="btn-zoomin" title="Zoom in">+</button>
+      <button id="btn-zoomout" title="Zoom out">&minus;</button>
+    </div>
+
+    <div id="toast-wrap"></div>
+    <div id="netbar" class="hidden"></div>
+    <div id="chatlog" class="hidden"></div>
+    <input id="chatbox" class="hidden" maxlength="120" placeholder="message the squad…">
+  </div>
+
+  <!-- ==================== TITLE ==================== -->
+  <section id="scr-title" class="screen active">
+    <canvas id="titlecv"></canvas>
+    <div class="title-inner">
+      <div class="logo">
+        <div class="logo-main">DUKE<span class="logo-cash">$</span>DEFENSE</div>
+        <div class="logo-rule"></div>
+        <div class="logo-tag">THE CITY IS EATING ITSELF. HOLD THE LINE.</div>
+      </div>
+      <div class="title-btns">
+        <button class="big-btn primary" id="t-play">SINGLE PLAYER</button>
+        <button class="big-btn coop" id="t-coop">CO-OP &middot; 4 PLAYER</button>
+        <button class="big-btn" id="t-how">HOW TO PLAY</button>
+        <button class="big-btn ghost" id="t-reset">RESET PROGRESS</button>
+      </div>
+      <div class="credit">15 DISTRICTS &middot; 12 WEAPONS &middot; 19 HOSTILES &middot; NO INSTALL REQUIRED</div>
+    </div>
+  </section>
+
+  <!-- ==================== DISTRICT SELECT ==================== -->
+  <section id="scr-map" class="screen">
+    <header class="maphead">
+      <button class="back" id="m-back">&#8592;</button>
+      <div>
+        <h1>THE FIVE BOROUGHS</h1>
+        <p id="m-progress">0 / 15 districts held</p>
+      </div>
+      <div class="starcount"><span>&#9733;</span><b id="m-stars">0</b><i>/45</i></div>
+    </header>
+    <div id="levelgrid"></div>
+  </section>
+
+  <!-- ==================== CO-OP LOBBY ==================== -->
+  <section id="scr-coop" class="screen">
+    <div class="lobby-card">
+      <div class="brief-eyebrow">CO-OPERATIVE DEPLOYMENT</div>
+      <h2>SQUAD UP</h2>
+
+      <div id="coop-connect">
+        <label class="fld"><span>CALLSIGN</span><input id="co-name" maxlength="12" placeholder="DUKE"></label>
+        <label class="fld"><span>SERVER</span><input id="co-server" placeholder="ws://localhost:8177"></label>
+        <p class="hint" id="co-localhint">
+          Run <code>node server.js</code> in the game folder. It prints a
+          <b>Network</b> address &mdash; everyone on your WiFi opens that in a browser
+          and the server box fills itself in.
+        </p>
+        <p class="hint" id="co-webhint" style="display:none">
+          You're connected. <b>Host</b> a room and share your code, or <b>Join</b>
+          a friend's &mdash; everyone plays on the same golden apple.
+        </p>
+        <div class="brief-btns">
+          <button class="big-btn" id="co-host">HOST A ROOM</button>
+          <button class="big-btn" id="co-joinbtn">JOIN A ROOM</button>
+        </div>
+        <div id="co-joinrow" class="hidden">
+          <label class="fld"><span>ROOM CODE</span><input id="co-code" maxlength="4" placeholder="ABCD"></label>
+          <button class="big-btn primary" id="co-godo">JOIN</button>
+        </div>
+        <div id="co-err" class="co-err"></div>
+      </div>
+
+      <div id="coop-room" class="hidden">
+        <div class="roomcode">
+          <span>ROOM CODE</span><b id="co-roomcode">----</b>
+          <button class="minibtn" id="co-copy">COPY</button>
+        </div>
+        <div id="co-roster" class="roster"></div>
+        <label class="fld"><span>DISTRICT</span><select id="co-level"></select></label>
+        <div id="co-chatwrap">
+          <div id="co-chat"></div>
+          <input id="co-say" maxlength="120" placeholder="message the squad…">
+        </div>
+        <div class="brief-btns">
+          <button class="big-btn ghost" id="co-leave">LEAVE</button>
+          <button class="big-btn primary" id="co-start">DEPLOY SQUAD</button>
+        </div>
+        <p class="hint" id="co-waiting">Only the host can start the mission.</p>
+      </div>
+
+      <button class="big-btn ghost" id="co-back" style="margin-top:14px">BACK</button>
+    </div>
+  </section>
+
+  <!-- ==================== BRIEFING ==================== -->
+  <section id="scr-brief" class="screen">
+    <div class="brief-card">
+      <div class="brief-top">
+        <div class="brief-eyebrow" id="b-borough">MANHATTAN</div>
+        <h2 id="b-name">TIMES SQUARE</h2>
+        <p id="b-blurb"></p>
+      </div>
+      <div class="brief-stats">
+        <div><label>WAVES</label><b id="b-waves">12</b></div>
+        <div><label>APPLE HP</label><b id="b-lives">20</b></div>
+        <div><label>OPENING FUNDS</label><b id="b-gold">$300</b></div>
+        <div><label>CONDITIONS</label><b id="b-weather">CLEAR</b></div>
+      </div>
+      <div class="brief-threats">
+        <label>EXPECTED HOSTILES</label>
+        <div id="b-threats"></div>
+      </div>
+      <div class="brief-btns">
+        <button class="big-btn ghost" id="b-back">BACK</button>
+        <button class="big-btn primary" id="b-go">DEPLOY</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ==================== RESULT ==================== -->
+  <section id="scr-result" class="screen">
+    <div class="result-card">
+      <div id="r-banner">DISTRICT HELD</div>
+      <h2 id="r-name">TIMES SQUARE</h2>
+      <div class="stars" id="r-stars"><i>&#9733;</i><i>&#9733;</i><i>&#9733;</i></div>
+      <div class="result-stats">
+        <div><label>HOSTILES DOWN</label><b id="r-kills">0</b></div>
+        <div><label>APPLE INTEGRITY</label><b id="r-lives">100%</b></div>
+        <div><label>FUNDS EARNED</label><b id="r-gold">$0</b></div>
+        <div><label>TIME</label><b id="r-time">0:00</b></div>
+        <div><label>SIDEARM KILLS</label><b id="r-side">0</b></div>
+        <div><label>SUPPLIES GRABBED</label><b id="r-grab">0</b></div>
+      </div>
+      <div class="brief-btns">
+        <button class="big-btn ghost" id="r-map">DISTRICTS</button>
+        <button class="big-btn" id="r-retry">RETRY</button>
+        <button class="big-btn primary" id="r-next">NEXT DISTRICT</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ==================== HOW TO PLAY ==================== -->
+  <section id="scr-how" class="screen">
+    <div class="how-card">
+      <h2>HOW TO PLAY</h2>
+      <div class="how-grid">
+        <div><h3>1 &middot; The Apple</h3><p>A golden apple sits at the end of every route. Vermin walk the street to reach it, and every one that arrives takes a bite. Lose all the bites and the district falls.</p></div>
+        <div><h3>2 &middot; Emplace Anywhere</h3><p>Pick a weapon off the tray, then set it down <b>anywhere that isn't road or building</b>. A green footprint means clear ground; red means find somewhere else.</p></div>
+        <div><h3>3 &middot; Your Sidearm</h3><p>With no weapon selected, <b>click to shoot</b>. It won't carry a wave on its own, but it finishes wounded runners and pays 25% extra bounty.</p></div>
+        <div><h3>4 &middot; Shoot the Drops</h3><p>Kills and supply drops leave <b>cash, ammo crates and medkits</b> lying in the street. Shoot them to collect. They expire, so keep scanning.</p></div>
+        <div><h3>5 &middot; Armour</h3><p>Ball ammo gets punished hard by plate. Bring <b>HE, incendiary or energy</b> against gators, golems, and anything with a caution sign for a head.</p></div>
+        <div><h3>6 &middot; Move the Camera</h3><p>The battlefield is far bigger than the window. <b>Right-drag or WASD</b> to pan, <b>wheel</b> to zoom, and click the minimap to jump across the map.</p></div>
+      </div>
+      <div class="how-keys">
+        <span><kbd>1</kbd>&ndash;<kbd>0</kbd> weapon</span>
+        <span><kbd>Z</kbd><kbd>X</kbd><kbd>C</kbd> support</span>
+        <span><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> pan</span>
+        <span><kbd>SPACE</kbd> pause</span>
+        <span><kbd>F</kbd> speed</span>
+        <span><kbd>N</kbd> next wave</span>
+        <span><kbd>ENTER</kbd> chat</span>
+        <span><kbd>ESC</kbd> cancel</span>
+      </div>
+      <button class="big-btn primary" id="how-back">GOT IT</button>
+    </div>
+  </section>
+
+  <!-- ==================== LOADING ==================== -->
+  <section id="scr-load" class="screen">
+    <div class="loadbox">
+      <div class="loadapple">&#127822;</div>
+      <div class="loadbar"><i id="loadfill"></i></div>
+      <div class="loadtxt" id="loadtxt">SURVEYING THE GROUND&hellip;</div>
+    </div>
+  </section>
+
+</div>
+
+<script src="js/core.js"></script>
+<script src="js/art.js"></script>
+<script src="js/data.js"></script>
+<script src="js/render.js"></script>
+<script src="js/game.js"></script>
+<script src="js/net.js"></script>
+<script src="js/ui.js"></script>
+</body>
+</html>
