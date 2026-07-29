@@ -1025,17 +1025,18 @@ window.DUKE_SOLO = true;
    players have room to spread out and hold different approaches. The size is
    chosen before a level loads (setWorldSize) and everything that bakes or
    scales reads WORLD_W/WORLD_H live. */
-/* One board size for every mode. Weapon ranges are tuned to this, so scaling
-   the canvas up (as an earlier version did for co-op) left towers unable to
-   reach the road. "A bigger board" is delivered instead as LONGER ROUTES —
-   more road for enemies to cross before the apple — at this fixed size, so
-   ranges and placement behave identically in solo and co-op. */
+/* Co-op plays on a bigger board with four spawn lanes. Weapon ranges,
+   projectile speeds and blast radii are scaled by the same factor (see
+   stat() in game.js) so towers reach the road exactly as they do in solo —
+   the earlier bug was scaling the board but not the ranges. */
 const BASE_WORLD_W = 2560, BASE_WORLD_H = 1440;
+const COOP_WORLD_W = 3456, COOP_WORLD_H = 1944;      /* 1.35x linear, ~1.8x area */
 let WORLD_W = BASE_WORLD_W, WORLD_H = BASE_WORLD_H;
 function setWorldSize(coop) {
-  WORLD_W = BASE_WORLD_W;
-  WORLD_H = BASE_WORLD_H;
+  WORLD_W = coop ? COOP_WORLD_W : BASE_WORLD_W;
+  WORLD_H = coop ? COOP_WORLD_H : BASE_WORLD_H;
 }
+function worldScale() { return WORLD_W / BASE_WORLD_W; }
 let VIEW_W = 1600, VIEW_H = 900;
 
 /* Pick a logical resolution matching the window's shape. The long edge is
@@ -3895,8 +3896,8 @@ function makeWaves(idx, count, pool, boss, opts) {
      DIFFICULTY is the one dial for the whole game: it lifts hit points and
      the wave-strength ramp everywhere. Wave 1 stays winnable; the middle and
      back of every district hit a lot harder than they used to. */
-  const DIFFICULTY = 1.32;
-  const tier = 1 + idx * 0.095;
+  const DIFFICULTY = 1.5;
+  const tier = 1 + idx * 0.11;
   const nPaths = opts.paths || 1;
 
   for (let w = 0; w < count; w++) {
@@ -3967,42 +3968,112 @@ function makeWaves(idx, count, pool, boss, opts) {
 
 
 /* ==========================================================
-   LEVEL CONSTRUCTION HELPERS
+   PROCEDURAL PATHWAYS
+   Every route is generated, not authored — a complex winding pattern
+   from a spawn point on the border to the apple. The pattern STYLE is
+   chosen from the district's seed, so each level has its own signature
+   (long serpentines, tight switchbacks, an inward spiral, an organic
+   meander). All generation is seeded and deterministic, so the host and
+   every co-op client build byte-identical routes. Authored in a
+   1600x900 space and scaled to the live board.
    ========================================================== */
-/* MORE PASSWAY: give every long straight in a route a gentle serpentine so
-   enemies cover noticeably more ground before the apple, without moving the
-   entry points or the apple itself. Buildings are placed after routes and
-   simply avoid them, so a windier road just means a windier road. Authored
-   in 1600x900 space; the endpoints (spawn + apple) are never displaced. */
-function windPath(pts) {
-  if (pts.length < 2) return pts.map(w => ({ x: w.x, y: w.y }));
-  /* How much passway does this route already have? A route that's straight
-     (ratio near 1) gets a lot of serpentine added; one that already snakes
-     around (Central Park, the Ramble) is left alone so it never turns into
-     spaghetti. Everything lands around a consistent target. */
-  let len = 0;
-  for (let i = 0; i < pts.length - 1; i++) len += Math.hypot(pts[i + 1].x - pts[i].x, pts[i + 1].y - pts[i].y);
-  const straight = Math.hypot(pts[pts.length - 1].x - pts[0].x, pts[pts.length - 1].y - pts[0].y) || 1;
-  const TARGET = 2.0;
-  const deficit = Math.max(0, TARGET - len / straight);
-  if (deficit < 0.15) return pts.map(w => ({ x: w.x, y: w.y }));
-  const k = Math.min(0.24, deficit * 0.24);
+const PATH_STYLES = ['serpentine', 'switchback', 'spiral', 'meander', 'horseshoe'];
+const PB = { x0: 95, y0: 85, x1: 1505, y1: 815 };     /* keep-on-board bounds */
+const clampPt = p => ({ x: U.clamp(p.x, PB.x0, PB.x1), y: U.clamp(p.y, PB.y0, PB.y1) });
 
-  const out = [{ x: pts[0].x, y: pts[0].y }];
-  for (let i = 0; i < pts.length - 1; i++) {
-    const a = pts[i], b = pts[i + 1];
-    const dx = b.x - a.x, dy = b.y - a.y;
-    const L = Math.hypot(dx, dy);
-    if (L > 110) {
-      const nx = -dy / L, ny = dx / L;                /* unit perpendicular */
-      const amp = Math.min(L * k, 105);
-      const sign = (i % 2 === 0) ? 1 : -1;            /* alternate = serpentine */
-      out.push({ x: a.x + dx * 0.33 + nx * amp * sign, y: a.y + dy * 0.33 + ny * amp * sign });
-      out.push({ x: a.x + dx * 0.66 - nx * amp * sign, y: a.y + dy * 0.66 - ny * amp * sign });
+/* spawn points spread around the border, biased away from the apple */
+function genEntries(rng, apple, n) {
+  const cx = 800, cy = 450;
+  const a0 = rng() * U.TAU;
+  const entries = [];
+  for (let i = 0; i < n; i++) {
+    let ang = a0 + (i / n) * U.TAU + (rng() - 0.5) * (0.7 / n);
+    const dx = Math.cos(ang), dy = Math.sin(ang);
+    let t = Infinity;
+    if (dx > 0.001) t = Math.min(t, (PB.x1 - cx) / dx); else if (dx < -0.001) t = Math.min(t, (PB.x0 - cx) / dx);
+    if (dy > 0.001) t = Math.min(t, (PB.y1 - cy) / dy); else if (dy < -0.001) t = Math.min(t, (PB.y0 - cy) / dy);
+    let e = clampPt({ x: cx + dx * t, y: cy + dy * t });
+    /* if the spawn landed too near the apple, push it to the far border */
+    if (U.dist(e.x, e.y, apple.x, apple.y) < 360) {
+      e = clampPt({ x: cx - dx * t, y: cy - dy * t });
     }
-    out.push({ x: b.x, y: b.y });
+    entries.push(e);
   }
-  return out.map(p => ({ x: U.clamp(p.x, 30, 1570), y: U.clamp(p.y, 30, 870) }));
+  return entries;
+}
+
+/* one complex route from `entry` to `apple` in a given style */
+function genPath(rng, entry, apple, style, intensity) {
+  const dx = apple.x - entry.x, dy = apple.y - entry.y;
+  const dist = Math.hypot(dx, dy) || 1;
+  const ux = dx / dist, uy = dy / dist;               /* toward apple */
+  const px = -uy, py = ux;                            /* perpendicular */
+  const pts = [{ x: entry.x, y: entry.y }];
+  const I = intensity || 1;
+
+  if (style === 'serpentine') {
+    const sweeps = 3 + (rng() * 2 | 0);
+    const amp = (130 + rng() * 120) * I;
+    for (let i = 1; i <= sweeps; i++) {
+      const t = i / (sweeps + 1);
+      const side = (i % 2 === 0) ? 1 : -1;
+      const a = amp * (0.55 + 0.45 * Math.sin(t * Math.PI));
+      pts.push(clampPt({ x: entry.x + dx * t + px * a * side, y: entry.y + dy * t + py * a * side }));
+    }
+  } else if (style === 'switchback') {
+    const zigs = 4 + (rng() * 2 | 0);
+    const amp = (150 + rng() * 100) * I;
+    for (let i = 1; i <= zigs; i++) {
+      const t = i / (zigs + 1);
+      const side = (i % 2 === 0) ? 1 : -1;
+      const cx = entry.x + dx * t, cy = entry.y + dy * t;
+      pts.push(clampPt({ x: cx + px * amp * side, y: cy + py * amp * side }));
+    }
+  } else if (style === 'spiral') {
+    const turns = 0.55 + rng() * 0.5;
+    const dir = rng() < 0.5 ? 1 : -1;
+    const steps = 8 + (rng() * 3 | 0);
+    const a0 = Math.atan2(entry.y - apple.y, entry.x - apple.x);
+    for (let i = 1; i <= steps; i++) {
+      const t = i / steps;
+      const r = dist * (1 - t * 0.80);
+      const ang = a0 + dir * turns * U.TAU * t;
+      pts.push(clampPt({ x: apple.x + Math.cos(ang) * r, y: apple.y + Math.sin(ang) * r }));
+    }
+  } else if (style === 'horseshoe') {
+    /* big loop out to one side then back across to the apple */
+    const side = rng() < 0.5 ? 1 : -1;
+    const amp = (200 + rng() * 130) * I;
+    [0.2, 0.38, 0.56, 0.74].forEach(t => {
+      const bulge = amp * Math.sin(t * Math.PI);
+      const s2 = (t < 0.5) ? side : -side * 0.6;
+      pts.push(clampPt({ x: entry.x + dx * t + px * bulge * s2, y: entry.y + dy * t + py * bulge * s2 }));
+    });
+  } else { /* meander */
+    const steps = 5 + (rng() * 3 | 0);
+    for (let i = 1; i <= steps; i++) {
+      const t = i / steps;
+      const cx = entry.x + dx * t, cy = entry.y + dy * t;
+      const j = (150 * (1 - t * 0.4)) * I;
+      const off = (rng() * 0.55 + 0.45) * (rng() < 0.5 ? 1 : -1);
+      pts.push(clampPt({ x: cx + px * j * off, y: cy + py * j * off }));
+    }
+  }
+  pts.push({ x: apple.x, y: apple.y });
+  return pts;
+}
+
+/* build all the routes for a level at the current board size + mode */
+function buildRoutes(cfg, coop) {
+  const raw = cfg._raw;
+  const rawApple = raw.paths[0][raw.paths[0].length - 1];
+  const soloLanes = Math.max(1, raw.paths.length);
+  const nLanes = coop ? 4 : soloLanes;
+  const rng = U.rng(cfg.buildSeed * 131 + (coop ? 90001 : 0));
+  const style = PATH_STYLES[cfg.buildSeed % PATH_STYLES.length];
+  const intensity = coop ? 1.15 : 1.0;                /* co-op routes wind harder */
+  const entries = genEntries(rng, rawApple, nLanes);
+  return { apple: rawApple, nLanes, rawPaths: entries.map(e => genPath(rng, e, rawApple, style, intensity)) };
 }
 
 /* Layouts are authored against a 1600x900 board and scaled to the current
@@ -4019,9 +4090,10 @@ function mkLevel(cfg) {
   const seen = {};
   cfg.waves.forEach(w => w.groups.forEach(g => { if (!seen[g.type]) { seen[g.type] = 1; cfg.threats.push(g.type); } }));
 
-  /* stash the authored (1600x900) geometry so we can rescale on demand */
+  /* stash the authored (1600x900) props/landmark + the ORIGINAL waypoints
+     (only their apple endpoint is used now — routes are generated) */
   cfg._raw = {
-    paths: cfg.paths.map(p => windPath(p)),
+    paths: cfg.paths.map(p => p.map(w => ({ x: w.x, y: w.y }))),
     landmark: cfg.landmark ? Object.assign({}, cfg.landmark) : null,
     props: (cfg.props || []).map(p => Object.assign({}, p)),
     lights: (cfg.lights || []).map(l => Object.assign({}, l)),
@@ -4031,11 +4103,23 @@ function mkLevel(cfg) {
   };
   delete cfg.padSpec;
 
-  /* rebuild everything spatial for the current WORLD_W/WORLD_H */
-  cfg.rescale = function () {
+  /* rebuild everything spatial for the current board size + mode (solo/co-op) */
+  cfg.rescale = function (opts) {
+    const coop = !!(opts && opts.coop);
     const sx = WORLD_W / 1600, sy = WORLD_H / 900, s = Math.min(sx, sy);
     const raw = cfg._raw;
-    cfg.paths = raw.paths.map(p => p.map(w => ({ x: w.x * sx, y: w.y * sy })));
+
+    /* generated routes for this mode */
+    const routes = buildRoutes(cfg, coop);
+    cfg.nPaths = routes.nLanes;
+    cfg.paths = routes.rawPaths.map(p => p.map(w => ({ x: w.x * sx, y: w.y * sy })));
+    cfg.builtPaths = cfg.paths.map(p => U.buildPath(p, 5));
+    cfg.base = { x: routes.apple.x * sx, y: routes.apple.y * sy };
+    cfg.startView = { x: cfg.base.x, y: cfg.base.y };
+
+    /* waves depend on the lane count, so rebuild them (deterministic per seed) */
+    cfg.waves = makeWaves(cfg.id, cfg.waveCount, cfg.pool, cfg.boss, { paths: routes.nLanes });
+
     cfg.landmark = raw.landmark ? Object.assign({}, raw.landmark, {
       x: raw.landmark.x * sx, y: raw.landmark.y * sy,
       s: (raw.landmark.s || 1) * s, clear: (raw.landmark.clear || 260) * s
@@ -4048,13 +4132,7 @@ function mkLevel(cfg) {
     cfg.lights = raw.lights.map(l => Object.assign({}, l, { x: l.x * sx, y: l.y * sy, r: (l.r || 130) * s }));
     cfg.keepClear = raw.keepClear.map(k => Object.assign({}, k, { x: k.x * sx, y: k.y * sy, r: k.r * s }));
     cfg.roadW = Math.round(raw.roadW * s);
-    /* buildings scale with area so a bigger board never looks sparse
-       (0.82 keeps the base board matching its original ~2.1x count) */
     cfg.cityDensity = Math.round(raw.density * sx * sy * 0.82);
-    cfg.builtPaths = cfg.paths.map(p => U.buildPath(p, 5));
-    const last = cfg.paths[0][cfg.paths[0].length - 1];
-    cfg.base = { x: last.x, y: last.y };
-    cfg.startView = { x: cfg.base.x, y: cfg.base.y };
     cfg.mask = null;                    /* force a re-bake of the placement grid */
   };
   cfg.rescale();
@@ -6011,29 +6089,31 @@ const Render = (() => {
     const s = d.tiers[0];
     const ok = g.valid && G.gold >= s.cost;
     const col = ok ? '#3fdd8f' : '#ff4a5a';
+    const W = G.wscale || 1;
+    const range = s.range * W, minRange = s.minRange ? s.minRange * W : 0;
 
     /* range */
     x.save();
     x.globalCompositeOperation = 'lighter';
-    const rg = x.createRadialGradient(g.x, g.y, s.range * .55, g.x, g.y, s.range);
+    const rg = x.createRadialGradient(g.x, g.y, range * .55, g.x, g.y, range);
     rg.addColorStop(0, U.alpha(col, .02));
     rg.addColorStop(.86, U.alpha(col, .10));
     rg.addColorStop(1, U.alpha(col, 0));
     x.fillStyle = rg;
-    x.beginPath(); x.ellipse(g.x, g.y, s.range, s.range * .86, 0, 0, U.TAU); x.fill();
+    x.beginPath(); x.ellipse(g.x, g.y, range, range * .86, 0, 0, U.TAU); x.fill();
     x.restore();
 
     x.save();
     x.strokeStyle = U.alpha(col, .8); x.lineWidth = 2;
     x.setLineDash([10, 8]); x.lineDashOffset = -t * 30;
-    x.beginPath(); x.ellipse(g.x, g.y, s.range, s.range * .86, 0, 0, U.TAU); x.stroke();
+    x.beginPath(); x.ellipse(g.x, g.y, range, range * .86, 0, 0, U.TAU); x.stroke();
     x.setLineDash([]);
 
     /* minimum range for indirect fire */
-    if (s.minRange) {
+    if (minRange) {
       x.strokeStyle = U.rgba(255, 90, 90, .55); x.lineWidth = 1.6;
       x.setLineDash([5, 6]);
-      x.beginPath(); x.ellipse(g.x, g.y, s.minRange, s.minRange * .86, 0, 0, U.TAU); x.stroke();
+      x.beginPath(); x.ellipse(g.x, g.y, minRange, minRange * .86, 0, 0, U.TAU); x.stroke();
       x.setLineDash([]);
     }
 
@@ -6500,7 +6580,7 @@ const Game = (() => {
     /* pick the board size for this mode, then rebuild the level's geometry
        for it — must happen before anything bakes or the camera is made */
     setWorldSize(!!opts.coop);
-    L.rescale();
+    L.rescale({ coop: !!opts.coop });
 
     const steps = [
       () => { G = fresh(L, opts); onProgress(.05, 'SURVEYING THE GROUND'); },
@@ -6536,6 +6616,7 @@ const Game = (() => {
       seed: opts.seed || 12345,
       rng: makeSync(opts.seed || 12345),
       cam: makeCamera(),
+      wscale: worldScale(),                 /* range/speed/splash multiplier for the board size */
 
       bg: null, lights: null, glow: null, decals: null, decalsCtx: null,
       enemies: [], towers: [], projectiles: [], particles: [], floats: [], pickups: [],
@@ -6807,7 +6888,8 @@ const Game = (() => {
     /* a shot that lands on a drop collects it rather than wasting the round */
     const near = pickupAt(wx, wy, tol || 40);
     if (near) { doGrab(near.id, by); return; }
-    let best = null, bd = 40 * 40;
+    const grab = 40 * G.wscale;
+    let best = null, bd = grab * grab;
     for (const e of G.enemies) {
       if (!e.alive) continue;
       const ey = e.y - (e.fly ? 28 : 0);
@@ -6885,7 +6967,24 @@ const Game = (() => {
     return back;
   }
 
-  const stat = t => t.def.tiers[t.tier];
+  /* Tower stats, with spatial values (reach, projectile speed, blast size)
+     scaled to the board so a bigger co-op map plays like solo. dmg/rate/arc
+     are untouched. Cached per tower so it's cheap. */
+  function stat(t) {
+    const raw = t.def.tiers[t.tier];
+    const w = G.wscale;
+    if (w === 1) return raw;
+    if (t._sTier !== t.tier) {
+      t._sTier = t.tier;
+      t._s = Object.assign({}, raw, {
+        range: raw.range * w,
+        minRange: raw.minRange ? raw.minRange * w : raw.minRange,
+        speed: raw.speed ? raw.speed * w : raw.speed,
+        splash: raw.splash ? raw.splash * w : raw.splash
+      });
+    }
+    return t._s;
+  }
 
   /* ---------- targeting ---------- */
   function findTarget(t) {
@@ -7048,7 +7147,8 @@ const Game = (() => {
           if (cur.alive && G.rng() < s.stunChance) applyStun(cur, s.stun);
           fromX = cur.x; fromY = cy;
           dmg *= s.falloff;
-          let nxt = null, nd = 150 * 150;
+          const jump = 150 * G.wscale;
+          let nxt = null, nd = jump * jump;
           for (const e of G.enemies) {
             if (!e.alive || hit[e.id]) continue;
             const d2 = U.dist2(fromX, fromY, e.x, e.y - (e.fly ? 28 : 0));
@@ -7200,8 +7300,9 @@ const Game = (() => {
       Audio2.play('freeze'); Audio2.duckMusic(.4, 2);
       toast('CRYO BURST', 'good'); shake(.35);
     } else if (name === 'blast' && aim) {
-      const hits = areaHit(aim.x, aim.y, A.radius, A.dmg, 'he', { stun: 1.2, stunChance: 1, big: true });
-      boom(aim.x, aim.y, A.radius, '#ff9d2e');
+      const R = A.radius * G.wscale;
+      const hits = areaHit(aim.x, aim.y, R, A.dmg, 'he', { stun: 1.2, stunChance: 1, big: true });
+      boom(aim.x, aim.y, R, '#ff9d2e');
       Audio2.play('boom'); Audio2.duckMusic(.35, 1.4); shake(1.0);
       if (hits === 0) toast('ROUNDS ON EMPTY GROUND', 'warn');
     } else return false;

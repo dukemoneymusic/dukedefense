@@ -14,17 +14,18 @@
    players have room to spread out and hold different approaches. The size is
    chosen before a level loads (setWorldSize) and everything that bakes or
    scales reads WORLD_W/WORLD_H live. */
-/* One board size for every mode. Weapon ranges are tuned to this, so scaling
-   the canvas up (as an earlier version did for co-op) left towers unable to
-   reach the road. "A bigger board" is delivered instead as LONGER ROUTES —
-   more road for enemies to cross before the apple — at this fixed size, so
-   ranges and placement behave identically in solo and co-op. */
+/* Co-op plays on a bigger board with four spawn lanes. Weapon ranges,
+   projectile speeds and blast radii are scaled by the same factor (see
+   stat() in game.js) so towers reach the road exactly as they do in solo —
+   the earlier bug was scaling the board but not the ranges. */
 const BASE_WORLD_W = 2560, BASE_WORLD_H = 1440;
+const COOP_WORLD_W = 3456, COOP_WORLD_H = 1944;      /* 1.35x linear, ~1.8x area */
 let WORLD_W = BASE_WORLD_W, WORLD_H = BASE_WORLD_H;
 function setWorldSize(coop) {
-  WORLD_W = BASE_WORLD_W;
-  WORLD_H = BASE_WORLD_H;
+  WORLD_W = coop ? COOP_WORLD_W : BASE_WORLD_W;
+  WORLD_H = coop ? COOP_WORLD_H : BASE_WORLD_H;
 }
+function worldScale() { return WORLD_W / BASE_WORLD_W; }
 let VIEW_W = 1600, VIEW_H = 900;
 
 /* Pick a logical resolution matching the window's shape. The long edge is

@@ -238,8 +238,8 @@ function makeWaves(idx, count, pool, boss, opts) {
      DIFFICULTY is the one dial for the whole game: it lifts hit points and
      the wave-strength ramp everywhere. Wave 1 stays winnable; the middle and
      back of every district hit a lot harder than they used to. */
-  const DIFFICULTY = 1.32;
-  const tier = 1 + idx * 0.095;
+  const DIFFICULTY = 1.5;
+  const tier = 1 + idx * 0.11;
   const nPaths = opts.paths || 1;
 
   for (let w = 0; w < count; w++) {
@@ -310,42 +310,112 @@ function makeWaves(idx, count, pool, boss, opts) {
 
 
 /* ==========================================================
-   LEVEL CONSTRUCTION HELPERS
+   PROCEDURAL PATHWAYS
+   Every route is generated, not authored — a complex winding pattern
+   from a spawn point on the border to the apple. The pattern STYLE is
+   chosen from the district's seed, so each level has its own signature
+   (long serpentines, tight switchbacks, an inward spiral, an organic
+   meander). All generation is seeded and deterministic, so the host and
+   every co-op client build byte-identical routes. Authored in a
+   1600x900 space and scaled to the live board.
    ========================================================== */
-/* MORE PASSWAY: give every long straight in a route a gentle serpentine so
-   enemies cover noticeably more ground before the apple, without moving the
-   entry points or the apple itself. Buildings are placed after routes and
-   simply avoid them, so a windier road just means a windier road. Authored
-   in 1600x900 space; the endpoints (spawn + apple) are never displaced. */
-function windPath(pts) {
-  if (pts.length < 2) return pts.map(w => ({ x: w.x, y: w.y }));
-  /* How much passway does this route already have? A route that's straight
-     (ratio near 1) gets a lot of serpentine added; one that already snakes
-     around (Central Park, the Ramble) is left alone so it never turns into
-     spaghetti. Everything lands around a consistent target. */
-  let len = 0;
-  for (let i = 0; i < pts.length - 1; i++) len += Math.hypot(pts[i + 1].x - pts[i].x, pts[i + 1].y - pts[i].y);
-  const straight = Math.hypot(pts[pts.length - 1].x - pts[0].x, pts[pts.length - 1].y - pts[0].y) || 1;
-  const TARGET = 2.0;
-  const deficit = Math.max(0, TARGET - len / straight);
-  if (deficit < 0.15) return pts.map(w => ({ x: w.x, y: w.y }));
-  const k = Math.min(0.24, deficit * 0.24);
+const PATH_STYLES = ['serpentine', 'switchback', 'spiral', 'meander', 'horseshoe'];
+const PB = { x0: 95, y0: 85, x1: 1505, y1: 815 };     /* keep-on-board bounds */
+const clampPt = p => ({ x: U.clamp(p.x, PB.x0, PB.x1), y: U.clamp(p.y, PB.y0, PB.y1) });
 
-  const out = [{ x: pts[0].x, y: pts[0].y }];
-  for (let i = 0; i < pts.length - 1; i++) {
-    const a = pts[i], b = pts[i + 1];
-    const dx = b.x - a.x, dy = b.y - a.y;
-    const L = Math.hypot(dx, dy);
-    if (L > 110) {
-      const nx = -dy / L, ny = dx / L;                /* unit perpendicular */
-      const amp = Math.min(L * k, 105);
-      const sign = (i % 2 === 0) ? 1 : -1;            /* alternate = serpentine */
-      out.push({ x: a.x + dx * 0.33 + nx * amp * sign, y: a.y + dy * 0.33 + ny * amp * sign });
-      out.push({ x: a.x + dx * 0.66 - nx * amp * sign, y: a.y + dy * 0.66 - ny * amp * sign });
+/* spawn points spread around the border, biased away from the apple */
+function genEntries(rng, apple, n) {
+  const cx = 800, cy = 450;
+  const a0 = rng() * U.TAU;
+  const entries = [];
+  for (let i = 0; i < n; i++) {
+    let ang = a0 + (i / n) * U.TAU + (rng() - 0.5) * (0.7 / n);
+    const dx = Math.cos(ang), dy = Math.sin(ang);
+    let t = Infinity;
+    if (dx > 0.001) t = Math.min(t, (PB.x1 - cx) / dx); else if (dx < -0.001) t = Math.min(t, (PB.x0 - cx) / dx);
+    if (dy > 0.001) t = Math.min(t, (PB.y1 - cy) / dy); else if (dy < -0.001) t = Math.min(t, (PB.y0 - cy) / dy);
+    let e = clampPt({ x: cx + dx * t, y: cy + dy * t });
+    /* if the spawn landed too near the apple, push it to the far border */
+    if (U.dist(e.x, e.y, apple.x, apple.y) < 360) {
+      e = clampPt({ x: cx - dx * t, y: cy - dy * t });
     }
-    out.push({ x: b.x, y: b.y });
+    entries.push(e);
   }
-  return out.map(p => ({ x: U.clamp(p.x, 30, 1570), y: U.clamp(p.y, 30, 870) }));
+  return entries;
+}
+
+/* one complex route from `entry` to `apple` in a given style */
+function genPath(rng, entry, apple, style, intensity) {
+  const dx = apple.x - entry.x, dy = apple.y - entry.y;
+  const dist = Math.hypot(dx, dy) || 1;
+  const ux = dx / dist, uy = dy / dist;               /* toward apple */
+  const px = -uy, py = ux;                            /* perpendicular */
+  const pts = [{ x: entry.x, y: entry.y }];
+  const I = intensity || 1;
+
+  if (style === 'serpentine') {
+    const sweeps = 3 + (rng() * 2 | 0);
+    const amp = (130 + rng() * 120) * I;
+    for (let i = 1; i <= sweeps; i++) {
+      const t = i / (sweeps + 1);
+      const side = (i % 2 === 0) ? 1 : -1;
+      const a = amp * (0.55 + 0.45 * Math.sin(t * Math.PI));
+      pts.push(clampPt({ x: entry.x + dx * t + px * a * side, y: entry.y + dy * t + py * a * side }));
+    }
+  } else if (style === 'switchback') {
+    const zigs = 4 + (rng() * 2 | 0);
+    const amp = (150 + rng() * 100) * I;
+    for (let i = 1; i <= zigs; i++) {
+      const t = i / (zigs + 1);
+      const side = (i % 2 === 0) ? 1 : -1;
+      const cx = entry.x + dx * t, cy = entry.y + dy * t;
+      pts.push(clampPt({ x: cx + px * amp * side, y: cy + py * amp * side }));
+    }
+  } else if (style === 'spiral') {
+    const turns = 0.55 + rng() * 0.5;
+    const dir = rng() < 0.5 ? 1 : -1;
+    const steps = 8 + (rng() * 3 | 0);
+    const a0 = Math.atan2(entry.y - apple.y, entry.x - apple.x);
+    for (let i = 1; i <= steps; i++) {
+      const t = i / steps;
+      const r = dist * (1 - t * 0.80);
+      const ang = a0 + dir * turns * U.TAU * t;
+      pts.push(clampPt({ x: apple.x + Math.cos(ang) * r, y: apple.y + Math.sin(ang) * r }));
+    }
+  } else if (style === 'horseshoe') {
+    /* big loop out to one side then back across to the apple */
+    const side = rng() < 0.5 ? 1 : -1;
+    const amp = (200 + rng() * 130) * I;
+    [0.2, 0.38, 0.56, 0.74].forEach(t => {
+      const bulge = amp * Math.sin(t * Math.PI);
+      const s2 = (t < 0.5) ? side : -side * 0.6;
+      pts.push(clampPt({ x: entry.x + dx * t + px * bulge * s2, y: entry.y + dy * t + py * bulge * s2 }));
+    });
+  } else { /* meander */
+    const steps = 5 + (rng() * 3 | 0);
+    for (let i = 1; i <= steps; i++) {
+      const t = i / steps;
+      const cx = entry.x + dx * t, cy = entry.y + dy * t;
+      const j = (150 * (1 - t * 0.4)) * I;
+      const off = (rng() * 0.55 + 0.45) * (rng() < 0.5 ? 1 : -1);
+      pts.push(clampPt({ x: cx + px * j * off, y: cy + py * j * off }));
+    }
+  }
+  pts.push({ x: apple.x, y: apple.y });
+  return pts;
+}
+
+/* build all the routes for a level at the current board size + mode */
+function buildRoutes(cfg, coop) {
+  const raw = cfg._raw;
+  const rawApple = raw.paths[0][raw.paths[0].length - 1];
+  const soloLanes = Math.max(1, raw.paths.length);
+  const nLanes = coop ? 4 : soloLanes;
+  const rng = U.rng(cfg.buildSeed * 131 + (coop ? 90001 : 0));
+  const style = PATH_STYLES[cfg.buildSeed % PATH_STYLES.length];
+  const intensity = coop ? 1.15 : 1.0;                /* co-op routes wind harder */
+  const entries = genEntries(rng, rawApple, nLanes);
+  return { apple: rawApple, nLanes, rawPaths: entries.map(e => genPath(rng, e, rawApple, style, intensity)) };
 }
 
 /* Layouts are authored against a 1600x900 board and scaled to the current
@@ -362,9 +432,10 @@ function mkLevel(cfg) {
   const seen = {};
   cfg.waves.forEach(w => w.groups.forEach(g => { if (!seen[g.type]) { seen[g.type] = 1; cfg.threats.push(g.type); } }));
 
-  /* stash the authored (1600x900) geometry so we can rescale on demand */
+  /* stash the authored (1600x900) props/landmark + the ORIGINAL waypoints
+     (only their apple endpoint is used now — routes are generated) */
   cfg._raw = {
-    paths: cfg.paths.map(p => windPath(p)),
+    paths: cfg.paths.map(p => p.map(w => ({ x: w.x, y: w.y }))),
     landmark: cfg.landmark ? Object.assign({}, cfg.landmark) : null,
     props: (cfg.props || []).map(p => Object.assign({}, p)),
     lights: (cfg.lights || []).map(l => Object.assign({}, l)),
@@ -374,11 +445,23 @@ function mkLevel(cfg) {
   };
   delete cfg.padSpec;
 
-  /* rebuild everything spatial for the current WORLD_W/WORLD_H */
-  cfg.rescale = function () {
+  /* rebuild everything spatial for the current board size + mode (solo/co-op) */
+  cfg.rescale = function (opts) {
+    const coop = !!(opts && opts.coop);
     const sx = WORLD_W / 1600, sy = WORLD_H / 900, s = Math.min(sx, sy);
     const raw = cfg._raw;
-    cfg.paths = raw.paths.map(p => p.map(w => ({ x: w.x * sx, y: w.y * sy })));
+
+    /* generated routes for this mode */
+    const routes = buildRoutes(cfg, coop);
+    cfg.nPaths = routes.nLanes;
+    cfg.paths = routes.rawPaths.map(p => p.map(w => ({ x: w.x * sx, y: w.y * sy })));
+    cfg.builtPaths = cfg.paths.map(p => U.buildPath(p, 5));
+    cfg.base = { x: routes.apple.x * sx, y: routes.apple.y * sy };
+    cfg.startView = { x: cfg.base.x, y: cfg.base.y };
+
+    /* waves depend on the lane count, so rebuild them (deterministic per seed) */
+    cfg.waves = makeWaves(cfg.id, cfg.waveCount, cfg.pool, cfg.boss, { paths: routes.nLanes });
+
     cfg.landmark = raw.landmark ? Object.assign({}, raw.landmark, {
       x: raw.landmark.x * sx, y: raw.landmark.y * sy,
       s: (raw.landmark.s || 1) * s, clear: (raw.landmark.clear || 260) * s
@@ -391,13 +474,7 @@ function mkLevel(cfg) {
     cfg.lights = raw.lights.map(l => Object.assign({}, l, { x: l.x * sx, y: l.y * sy, r: (l.r || 130) * s }));
     cfg.keepClear = raw.keepClear.map(k => Object.assign({}, k, { x: k.x * sx, y: k.y * sy, r: k.r * s }));
     cfg.roadW = Math.round(raw.roadW * s);
-    /* buildings scale with area so a bigger board never looks sparse
-       (0.82 keeps the base board matching its original ~2.1x count) */
     cfg.cityDensity = Math.round(raw.density * sx * sy * 0.82);
-    cfg.builtPaths = cfg.paths.map(p => U.buildPath(p, 5));
-    const last = cfg.paths[0][cfg.paths[0].length - 1];
-    cfg.base = { x: last.x, y: last.y };
-    cfg.startView = { x: cfg.base.x, y: cfg.base.y };
     cfg.mask = null;                    /* force a re-bake of the placement grid */
   };
   cfg.rescale();

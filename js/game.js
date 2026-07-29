@@ -31,7 +31,7 @@ const Game = (() => {
     /* pick the board size for this mode, then rebuild the level's geometry
        for it — must happen before anything bakes or the camera is made */
     setWorldSize(!!opts.coop);
-    L.rescale();
+    L.rescale({ coop: !!opts.coop });
 
     const steps = [
       () => { G = fresh(L, opts); onProgress(.05, 'SURVEYING THE GROUND'); },
@@ -67,6 +67,7 @@ const Game = (() => {
       seed: opts.seed || 12345,
       rng: makeSync(opts.seed || 12345),
       cam: makeCamera(),
+      wscale: worldScale(),                 /* range/speed/splash multiplier for the board size */
 
       bg: null, lights: null, glow: null, decals: null, decalsCtx: null,
       enemies: [], towers: [], projectiles: [], particles: [], floats: [], pickups: [],
@@ -338,7 +339,8 @@ const Game = (() => {
     /* a shot that lands on a drop collects it rather than wasting the round */
     const near = pickupAt(wx, wy, tol || 40);
     if (near) { doGrab(near.id, by); return; }
-    let best = null, bd = 40 * 40;
+    const grab = 40 * G.wscale;
+    let best = null, bd = grab * grab;
     for (const e of G.enemies) {
       if (!e.alive) continue;
       const ey = e.y - (e.fly ? 28 : 0);
@@ -416,7 +418,24 @@ const Game = (() => {
     return back;
   }
 
-  const stat = t => t.def.tiers[t.tier];
+  /* Tower stats, with spatial values (reach, projectile speed, blast size)
+     scaled to the board so a bigger co-op map plays like solo. dmg/rate/arc
+     are untouched. Cached per tower so it's cheap. */
+  function stat(t) {
+    const raw = t.def.tiers[t.tier];
+    const w = G.wscale;
+    if (w === 1) return raw;
+    if (t._sTier !== t.tier) {
+      t._sTier = t.tier;
+      t._s = Object.assign({}, raw, {
+        range: raw.range * w,
+        minRange: raw.minRange ? raw.minRange * w : raw.minRange,
+        speed: raw.speed ? raw.speed * w : raw.speed,
+        splash: raw.splash ? raw.splash * w : raw.splash
+      });
+    }
+    return t._s;
+  }
 
   /* ---------- targeting ---------- */
   function findTarget(t) {
@@ -579,7 +598,8 @@ const Game = (() => {
           if (cur.alive && G.rng() < s.stunChance) applyStun(cur, s.stun);
           fromX = cur.x; fromY = cy;
           dmg *= s.falloff;
-          let nxt = null, nd = 150 * 150;
+          const jump = 150 * G.wscale;
+          let nxt = null, nd = jump * jump;
           for (const e of G.enemies) {
             if (!e.alive || hit[e.id]) continue;
             const d2 = U.dist2(fromX, fromY, e.x, e.y - (e.fly ? 28 : 0));
@@ -731,8 +751,9 @@ const Game = (() => {
       Audio2.play('freeze'); Audio2.duckMusic(.4, 2);
       toast('CRYO BURST', 'good'); shake(.35);
     } else if (name === 'blast' && aim) {
-      const hits = areaHit(aim.x, aim.y, A.radius, A.dmg, 'he', { stun: 1.2, stunChance: 1, big: true });
-      boom(aim.x, aim.y, A.radius, '#ff9d2e');
+      const R = A.radius * G.wscale;
+      const hits = areaHit(aim.x, aim.y, R, A.dmg, 'he', { stun: 1.2, stunChance: 1, big: true });
+      boom(aim.x, aim.y, R, '#ff9d2e');
       Audio2.play('boom'); Audio2.duckMusic(.35, 1.4); shake(1.0);
       if (hits === 0) toast('ROUNDS ON EMPTY GROUND', 'warn');
     } else return false;

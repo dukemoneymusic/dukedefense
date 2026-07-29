@@ -1506,29 +1506,31 @@ const Render = (() => {
     const s = d.tiers[0];
     const ok = g.valid && G.gold >= s.cost;
     const col = ok ? '#3fdd8f' : '#ff4a5a';
+    const W = G.wscale || 1;
+    const range = s.range * W, minRange = s.minRange ? s.minRange * W : 0;
 
     /* range */
     x.save();
     x.globalCompositeOperation = 'lighter';
-    const rg = x.createRadialGradient(g.x, g.y, s.range * .55, g.x, g.y, s.range);
+    const rg = x.createRadialGradient(g.x, g.y, range * .55, g.x, g.y, range);
     rg.addColorStop(0, U.alpha(col, .02));
     rg.addColorStop(.86, U.alpha(col, .10));
     rg.addColorStop(1, U.alpha(col, 0));
     x.fillStyle = rg;
-    x.beginPath(); x.ellipse(g.x, g.y, s.range, s.range * .86, 0, 0, U.TAU); x.fill();
+    x.beginPath(); x.ellipse(g.x, g.y, range, range * .86, 0, 0, U.TAU); x.fill();
     x.restore();
 
     x.save();
     x.strokeStyle = U.alpha(col, .8); x.lineWidth = 2;
     x.setLineDash([10, 8]); x.lineDashOffset = -t * 30;
-    x.beginPath(); x.ellipse(g.x, g.y, s.range, s.range * .86, 0, 0, U.TAU); x.stroke();
+    x.beginPath(); x.ellipse(g.x, g.y, range, range * .86, 0, 0, U.TAU); x.stroke();
     x.setLineDash([]);
 
     /* minimum range for indirect fire */
-    if (s.minRange) {
+    if (minRange) {
       x.strokeStyle = U.rgba(255, 90, 90, .55); x.lineWidth = 1.6;
       x.setLineDash([5, 6]);
-      x.beginPath(); x.ellipse(g.x, g.y, s.minRange, s.minRange * .86, 0, 0, U.TAU); x.stroke();
+      x.beginPath(); x.ellipse(g.x, g.y, minRange, minRange * .86, 0, 0, U.TAU); x.stroke();
       x.setLineDash([]);
     }
 
