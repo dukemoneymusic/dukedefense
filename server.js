@@ -397,12 +397,21 @@ function boot(port, attemptsLeft) {
    link is effectively always-on. Costs nothing and stays well
    inside the free monthly hours for a single service.
 
+   OFF BY DEFAULT since 2026-07-31. Render's free tier allows 750
+   instance-hours per ACCOUNT per month, and one service kept awake
+   round the clock burns ~730 of them on its own. With SKELLZ NEON
+   now deployed too, leaving this on here as well would exhaust the
+   allowance and suspend BOTH games before month end. SKELLZ is the
+   always-on one now; set KEEP_AWAKE=1 here to swap it back (and
+   turn it off there if you do).
+
    Render injects RENDER_EXTERNAL_URL. Any other host can enable
    this by setting SELF_URL to the public https address.
    ============================================================ */
 let keepAwakeStarted = false;
 function keepAwake() {
   if (keepAwakeStarted) return;
+  if (!/^(1|true|yes|on)$/i.test(process.env.KEEP_AWAKE || '')) return;
   const url = (process.env.RENDER_EXTERNAL_URL || process.env.SELF_URL || '').replace(/\/+$/, '');
   if (!url || typeof fetch !== 'function') return;
   keepAwakeStarted = true;
