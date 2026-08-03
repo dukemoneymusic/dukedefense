@@ -183,7 +183,7 @@ const Game = (() => {
   /* ==========================================================
      ENEMIES
      ========================================================== */
-  function spawn(type, pathIdx, hpMul, spdMul, waveIdx, atD) {
+  function spawn(type, pathIdx, hpMul, spdMul, waveIdx, atD, payMul) {
     const def = ENEMIES[type];
     const L = G.level;
     const path = L.builtPaths[Math.min(pathIdx, L.builtPaths.length - 1)];
@@ -200,10 +200,14 @@ const Game = (() => {
       maxHp: def.hp * hpMul, hp: def.hp * hpMul,
       baseSpd: def.spd * spdMul, spd: def.spd * spdMul,
       baseArmor: def.armor, armor: def.armor,
-      /* Bounty has to track hpMul closely or the economy falls behind the
-         difficulty curve and late districts become unwinnable rather than
-         hard. Kept just under 1:1 so each district still tightens. */
-      bounty: Math.round(def.bounty * (1 + (hpMul - 1) * .70)),
+      /* Bounty has to track toughness closely or the economy falls behind
+         the difficulty curve and late districts become unwinnable rather
+         than hard. Kept just under 1:1 so each district still tightens.
+         Priced off payMul, which excludes the co-op toughness bump — that
+         bump is meant to be felt, not refunded. */
+      bounty: Math.round(def.bounty * (1 + ((payMul === undefined ? hpMul : payMul) - 1) * .70)),
+      /* children split off this one inherit the same pricing basis */
+      payRatio: payMul === undefined ? 1 : payMul / hpMul,
       bite: def.bite, boss: !!def.boss, alive: true,
       slowT: 0, slowAmt: 0, burnT: 0, burnDps: 0, stunT: 0, frozen: 0,
       shredT: 0, shred: 0, hitFlash: 0, healT: 0, spawnT: 0, raged: false,
@@ -317,7 +321,8 @@ const Game = (() => {
 
     if (e.def.splits) {
       for (let k = 0; k < e.def.splits.n; k++) {
-        const c = spawn(e.def.splits.t, e.pathIdx, e.maxHp / (ENEMIES[e.def.splits.t].hp * 3.2), 1.15, e.wave, Math.max(0, e.d - 8 + k * 8));
+        const hm = e.maxHp / (ENEMIES[e.def.splits.t].hp * 3.2);
+        const c = spawn(e.def.splits.t, e.pathIdx, hm, 1.15, e.wave, Math.max(0, e.d - 8 + k * 8), hm * (e.payRatio || 1));
         c.hp = c.maxHp;
       }
     }
@@ -846,7 +851,7 @@ const Game = (() => {
         G.spawnQueue.push({
           t: G.time + (g.delay || 0) + k * g.gap,
           type: g.type, path: g.path || 0,
-          hpMul: g.hpMul, spdMul: g.spdMul, wave: idx
+          hpMul: g.hpMul, payMul: g.payMul, spdMul: g.spdMul, wave: idx
         });
       }
     });
@@ -966,7 +971,7 @@ const Game = (() => {
 
     while (G.spawnQueue.length && G.spawnQueue[0].t <= G.time) {
       const s = G.spawnQueue.shift();
-      spawn(s.type, s.path, s.hpMul, s.spdMul, s.wave);
+      spawn(s.type, s.path, s.hpMul, s.spdMul, s.wave, undefined, s.payMul);
     }
 
     for (let i = 0; i < G.wavesSent; i++) {
@@ -1037,7 +1042,8 @@ const Game = (() => {
         if (e.spawnT <= 0) {
           e.spawnT = e.def.spawns.every;
           for (let k = 0; k < e.def.spawns.n; k++) {
-            const c = spawn(e.def.spawns.t, e.pathIdx, Math.max(1, e.maxHp / 2600), 1.1, e.wave, Math.max(0, e.d - 20 + k * 10));
+            const hm = Math.max(1, e.maxHp / 2600);
+            const c = spawn(e.def.spawns.t, e.pathIdx, hm, 1.1, e.wave, Math.max(0, e.d - 20 + k * 10), hm * (e.payRatio || 1));
             c.hp = c.maxHp;
           }
           burst(e.x, e.y, 10, '#ffb02a', 'smoke');

@@ -239,6 +239,12 @@ function makeWaves(idx, count, pool, boss, opts) {
      the wave-strength ramp everywhere. Wave 1 stays winnable; the middle and
      back of every district hit a lot harder than they used to. */
   const DIFFICULTY = 1.62;
+  /* Four guns answering four lanes is a lot more firepower than one player
+     brings, so co-op hostiles are built to soak considerably more before
+     they drop. This is hit points only — head-count is already handled by
+     laneFactor, and piling on bodies would just thin every lane instead of
+     making the fight harder. */
+  const COOP_TOUGH = opts.coop ? 1.6 : 1;
   const tier = 1 + idx * 0.125;
   const nPaths = opts.paths || 1;
 
@@ -246,7 +252,11 @@ function makeWaves(idx, count, pool, boss, opts) {
     const p = count > 1 ? w / (count - 1) : 0;
     const isBoss = (w === count - 1) && !!boss;
     const isMini = !isBoss && count > 8 && w === Math.floor(count * .55);
-    const hpMul = tier * (0.70 + p * 1.95) * DIFFICULTY;
+    const hpMul = tier * (0.70 + p * 1.95) * DIFFICULTY * COOP_TOUGH;
+    /* Bounty is priced off the SOLO toughness. Paying out on the co-op
+       bump too would refund the extra difficulty as income — the first
+       attempt at this made co-op easier, not harder. */
+    const payMul = hpMul / COOP_TOUGH;
     const spdMul = 1 + p * 0.15 + idx * 0.008;
     /* Two or three lanes means each tower covers half or a third as much
        of the assault, so the same head-count is roughly twice the fight. */
@@ -254,7 +264,7 @@ function makeWaves(idx, count, pool, boss, opts) {
     const groups = [];
 
     if (isBoss) {
-      groups.push({ type: boss, count: 1, gap: 1, delay: 0, hpMul: hpMul * .92, spdMul: 1, path: 0, boss: true });
+      groups.push({ type: boss, count: 1, gap: 1, delay: 0, hpMul: hpMul * .92, payMul: payMul * .92, spdMul: 1, path: 0, boss: true });
       /* escort so the boss isn't lonely */
       const esc = pool.filter(e => e.from <= .7);
       for (let k = 0; k < Math.min(2, esc.length); k++) {
@@ -262,7 +272,7 @@ function makeWaves(idx, count, pool, boss, opts) {
         groups.push({
           type: e.t, count: Math.max(3, Math.round((6 + idx * 1.2) * laneFactor)),
           gap: .55, delay: 2 + k * 3.5,
-          hpMul: hpMul * .8, spdMul, path: k % nPaths
+          hpMul: hpMul * .8, payMul: payMul * .8, spdMul, path: k % nPaths
         });
       }
     } else {
@@ -300,6 +310,7 @@ function makeWaves(idx, count, pool, boss, opts) {
           gap: U.clamp(.9 - p * .42, .3, .9) / (bulk > 1.4 ? 1.9 : 1),
           delay: k * (1.6 + r() * 2.4),
           hpMul: hpMul * (isMini ? 1.18 : 1),
+          payMul: payMul * (isMini ? 1.18 : 1),
           spdMul,
           path: nPaths > 1 ? (k % nPaths) : 0
         });
@@ -560,8 +571,10 @@ function mkLevel(cfg) {
     cfg.base = { x: routes.apple.x * sx, y: routes.apple.y * sy };
     cfg.startView = { x: cfg.base.x, y: cfg.base.y };
 
-    /* waves depend on the lane count, so rebuild them (deterministic per seed) */
-    cfg.waves = makeWaves(cfg.id, cfg.waveCount, cfg.pool, cfg.boss, { paths: routes.nLanes });
+    /* waves depend on the lane count and the mode, so rebuild them
+       (still deterministic per seed, so host and clients agree) */
+    cfg.waves = makeWaves(cfg.id, cfg.waveCount, cfg.pool, cfg.boss,
+      { paths: routes.nLanes, coop: !!coop });
 
     /* more lanes to cover = more opening capital and a little more slack */
     cfg.gold = cfg._baseGold + (routes.nLanes - 1) * 170;

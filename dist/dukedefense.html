@@ -3904,6 +3904,12 @@ function makeWaves(idx, count, pool, boss, opts) {
      the wave-strength ramp everywhere. Wave 1 stays winnable; the middle and
      back of every district hit a lot harder than they used to. */
   const DIFFICULTY = 1.62;
+  /* Four guns answering four lanes is a lot more firepower than one player
+     brings, so co-op hostiles are built to soak considerably more before
+     they drop. This is hit points only — head-count is already handled by
+     laneFactor, and piling on bodies would just thin every lane instead of
+     making the fight harder. */
+  const COOP_TOUGH = opts.coop ? 1.6 : 1;
   const tier = 1 + idx * 0.125;
   const nPaths = opts.paths || 1;
 
@@ -3911,7 +3917,11 @@ function makeWaves(idx, count, pool, boss, opts) {
     const p = count > 1 ? w / (count - 1) : 0;
     const isBoss = (w === count - 1) && !!boss;
     const isMini = !isBoss && count > 8 && w === Math.floor(count * .55);
-    const hpMul = tier * (0.70 + p * 1.95) * DIFFICULTY;
+    const hpMul = tier * (0.70 + p * 1.95) * DIFFICULTY * COOP_TOUGH;
+    /* Bounty is priced off the SOLO toughness. Paying out on the co-op
+       bump too would refund the extra difficulty as income — the first
+       attempt at this made co-op easier, not harder. */
+    const payMul = hpMul / COOP_TOUGH;
     const spdMul = 1 + p * 0.15 + idx * 0.008;
     /* Two or three lanes means each tower covers half or a third as much
        of the assault, so the same head-count is roughly twice the fight. */
@@ -3919,7 +3929,7 @@ function makeWaves(idx, count, pool, boss, opts) {
     const groups = [];
 
     if (isBoss) {
-      groups.push({ type: boss, count: 1, gap: 1, delay: 0, hpMul: hpMul * .92, spdMul: 1, path: 0, boss: true });
+      groups.push({ type: boss, count: 1, gap: 1, delay: 0, hpMul: hpMul * .92, payMul: payMul * .92, spdMul: 1, path: 0, boss: true });
       /* escort so the boss isn't lonely */
       const esc = pool.filter(e => e.from <= .7);
       for (let k = 0; k < Math.min(2, esc.length); k++) {
@@ -3927,7 +3937,7 @@ function makeWaves(idx, count, pool, boss, opts) {
         groups.push({
           type: e.t, count: Math.max(3, Math.round((6 + idx * 1.2) * laneFactor)),
           gap: .55, delay: 2 + k * 3.5,
-          hpMul: hpMul * .8, spdMul, path: k % nPaths
+          hpMul: hpMul * .8, payMul: payMul * .8, spdMul, path: k % nPaths
         });
       }
     } else {
@@ -3965,6 +3975,7 @@ function makeWaves(idx, count, pool, boss, opts) {
           gap: U.clamp(.9 - p * .42, .3, .9) / (bulk > 1.4 ? 1.9 : 1),
           delay: k * (1.6 + r() * 2.4),
           hpMul: hpMul * (isMini ? 1.18 : 1),
+          payMul: payMul * (isMini ? 1.18 : 1),
           spdMul,
           path: nPaths > 1 ? (k % nPaths) : 0
         });
@@ -4225,8 +4236,10 @@ function mkLevel(cfg) {
     cfg.base = { x: routes.apple.x * sx, y: routes.apple.y * sy };
     cfg.startView = { x: cfg.base.x, y: cfg.base.y };
 
-    /* waves depend on the lane count, so rebuild them (deterministic per seed) */
-    cfg.waves = makeWaves(cfg.id, cfg.waveCount, cfg.pool, cfg.boss, { paths: routes.nLanes });
+    /* waves depend on the lane count and the mode, so rebuild them
+       (still deterministic per seed, so host and clients agree) */
+    cfg.waves = makeWaves(cfg.id, cfg.waveCount, cfg.pool, cfg.boss,
+      { paths: routes.nLanes, coop: !!coop });
 
     /* more lanes to cover = more opening capital and a little more slack */
     cfg.gold = cfg._baseGold + (routes.nLanes - 1) * 170;
@@ -6844,7 +6857,7 @@ const Game = (() => {
   /* ==========================================================
      ENEMIES
      ========================================================== */
-  function spawn(type, pathIdx, hpMul, spdMul, waveIdx, atD) {
+  function spawn(type, pathIdx, hpMul, spdMul, waveIdx, atD, payMul) {
     const def = ENEMIES[type];
     const L = G.level;
     const path = L.builtPaths[Math.min(pathIdx, L.builtPaths.length - 1)];
@@ -6861,10 +6874,14 @@ const Game = (() => {
       maxHp: def.hp * hpMul, hp: def.hp * hpMul,
       baseSpd: def.spd * spdMul, spd: def.spd * spdMul,
       baseArmor: def.armor, armor: def.armor,
-      /* Bounty has to track hpMul closely or the economy falls behind the
-         difficulty curve and late districts become unwinnable rather than
-         hard. Kept just under 1:1 so each district still tightens. */
-      bounty: Math.round(def.bounty * (1 + (hpMul - 1) * .70)),
+      /* Bounty has to track toughness closely or the economy falls behind
+         the difficulty curve and late districts become unwinnable rather
+         than hard. Kept just under 1:1 so each district still tightens.
+         Priced off payMul, which excludes the co-op toughness bump — that
+         bump is meant to be felt, not refunded. */
+      bounty: Math.round(def.bounty * (1 + ((payMul === undefined ? hpMul : payMul) - 1) * .70)),
+      /* children split off this one inherit the same pricing basis */
+      payRatio: payMul === undefined ? 1 : payMul / hpMul,
       bite: def.bite, boss: !!def.boss, alive: true,
       slowT: 0, slowAmt: 0, burnT: 0, burnDps: 0, stunT: 0, frozen: 0,
       shredT: 0, shred: 0, hitFlash: 0, healT: 0, spawnT: 0, raged: false,
@@ -6978,7 +6995,8 @@ const Game = (() => {
 
     if (e.def.splits) {
       for (let k = 0; k < e.def.splits.n; k++) {
-        const c = spawn(e.def.splits.t, e.pathIdx, e.maxHp / (ENEMIES[e.def.splits.t].hp * 3.2), 1.15, e.wave, Math.max(0, e.d - 8 + k * 8));
+        const hm = e.maxHp / (ENEMIES[e.def.splits.t].hp * 3.2);
+        const c = spawn(e.def.splits.t, e.pathIdx, hm, 1.15, e.wave, Math.max(0, e.d - 8 + k * 8), hm * (e.payRatio || 1));
         c.hp = c.maxHp;
       }
     }
@@ -7507,7 +7525,7 @@ const Game = (() => {
         G.spawnQueue.push({
           t: G.time + (g.delay || 0) + k * g.gap,
           type: g.type, path: g.path || 0,
-          hpMul: g.hpMul, spdMul: g.spdMul, wave: idx
+          hpMul: g.hpMul, payMul: g.payMul, spdMul: g.spdMul, wave: idx
         });
       }
     });
@@ -7627,7 +7645,7 @@ const Game = (() => {
 
     while (G.spawnQueue.length && G.spawnQueue[0].t <= G.time) {
       const s = G.spawnQueue.shift();
-      spawn(s.type, s.path, s.hpMul, s.spdMul, s.wave);
+      spawn(s.type, s.path, s.hpMul, s.spdMul, s.wave, undefined, s.payMul);
     }
 
     for (let i = 0; i < G.wavesSent; i++) {
@@ -7698,7 +7716,8 @@ const Game = (() => {
         if (e.spawnT <= 0) {
           e.spawnT = e.def.spawns.every;
           for (let k = 0; k < e.def.spawns.n; k++) {
-            const c = spawn(e.def.spawns.t, e.pathIdx, Math.max(1, e.maxHp / 2600), 1.1, e.wave, Math.max(0, e.d - 20 + k * 10));
+            const hm = Math.max(1, e.maxHp / 2600);
+            const c = spawn(e.def.spawns.t, e.pathIdx, hm, 1.1, e.wave, Math.max(0, e.d - 20 + k * 10), hm * (e.payRatio || 1));
             c.hp = c.maxHp;
           }
           burst(e.x, e.y, 10, '#ffb02a', 'smoke');
