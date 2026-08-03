@@ -238,8 +238,8 @@ function makeWaves(idx, count, pool, boss, opts) {
      DIFFICULTY is the one dial for the whole game: it lifts hit points and
      the wave-strength ramp everywhere. Wave 1 stays winnable; the middle and
      back of every district hit a lot harder than they used to. */
-  const DIFFICULTY = 1.5;
-  const tier = 1 + idx * 0.11;
+  const DIFFICULTY = 1.62;
+  const tier = 1 + idx * 0.125;
   const nPaths = opts.paths || 1;
 
   for (let w = 0; w < count; w++) {
@@ -284,8 +284,16 @@ function makeWaves(idx, count, pool, boss, opts) {
         used[chosen.t] = 1;
 
         const def = ENEMIES[chosen.t];
-        const bulk = def.hp < 60 ? 1.9 : (def.hp < 200 ? 1.0 : 0.45);
-        const n = Math.max(2, Math.round((3 + p * 16 + idx * .7) * bulk * (chosen.n || 1) * (isMini ? 1.5 : 1) * laneFactor));
+        /* Flyers cut corners and skip most of the route, so a flock is worth
+           far more than the same number of walkers. Count them lighter or the
+           opening waves of the air-heavy districts are unwinnable. */
+        let bulk = def.hp < 60 ? 1.9 : (def.hp < 200 ? 1.0 : 0.45);
+        if (def.fly) bulk *= 0.6;
+        /* The district index may only inflate head-count as the wave ramp
+           progresses. At full strength on wave 1 it opened late districts
+           with a swarm the fresh wallet cannot possibly answer. */
+        const idxRamp = idx * .7 * (0.25 + 0.75 * p);
+        const n = Math.max(2, Math.round((3 + p * 16 + idxRamp) * bulk * (chosen.n || 1) * (isMini ? 1.5 : 1) * laneFactor));
         groups.push({
           type: chosen.t,
           count: n,
@@ -321,87 +329,148 @@ function makeWaves(idx, count, pool, boss, opts) {
    ========================================================== */
 const PATH_STYLES = ['serpentine', 'switchback', 'spiral', 'meander', 'horseshoe'];
 const PB = { x0: 95, y0: 85, x1: 1505, y1: 815 };     /* keep-on-board bounds */
+/* How much a route can fold back on itself is set by how wide the street is
+   relative to the board. Slimmer streets buy real pattern complexity while
+   keeping a full road-width of clear asphalt between every pass. */
+const LANE_ROAD = 0.66;
 const clampPt = p => ({ x: U.clamp(p.x, PB.x0, PB.x1), y: U.clamp(p.y, PB.y0, PB.y1) });
 
-/* spawn points spread around the border, biased away from the apple */
-function genEntries(rng, apple, n) {
-  const cx = 800, cy = 450;
-  const a0 = rng() * U.TAU;
-  const entries = [];
-  for (let i = 0; i < n; i++) {
-    let ang = a0 + (i / n) * U.TAU + (rng() - 0.5) * (0.7 / n);
-    const dx = Math.cos(ang), dy = Math.sin(ang);
-    let t = Infinity;
-    if (dx > 0.001) t = Math.min(t, (PB.x1 - cx) / dx); else if (dx < -0.001) t = Math.min(t, (PB.x0 - cx) / dx);
-    if (dy > 0.001) t = Math.min(t, (PB.y1 - cy) / dy); else if (dy < -0.001) t = Math.min(t, (PB.y0 - cy) / dy);
-    let e = clampPt({ x: cx + dx * t, y: cy + dy * t });
-    /* if the spawn landed too near the apple, push it to the far border */
-    if (U.dist(e.x, e.y, apple.x, apple.y) < 360) {
-      e = clampPt({ x: cx - dx * t, y: cy - dy * t });
-    }
-    entries.push(e);
-  }
-  return entries;
+/* The board is 16:9, so a purely radial layout would give the vertical
+   lanes barely half the room of the horizontal ones (stub routes). We
+   generate in a SQUASHED space where the board is square, then map back.
+   A uniform axis scale is monotonic, so it cannot turn two non-crossing
+   curves into crossing ones — the no-overlap guarantee survives the trip. */
+const SQ = (PB.x1 - PB.x0) / (PB.y1 - PB.y0);
+const toSq   = p => ({ x: p.x, y: PB.y0 + (p.y - PB.y0) * SQ });
+const fromSq = p => ({ x: p.x, y: PB.y0 + (p.y - PB.y0) / SQ });
+const SQ_Y1 = PB.y0 + (PB.y1 - PB.y0) * SQ;
+
+/* distance from the apple to the board edge along `ang`, in squashed space */
+function reachToEdge(appleSq, ang) {
+  const dx = Math.cos(ang), dy = Math.sin(ang);
+  let t = Infinity;
+  if (dx > 0.001) t = Math.min(t, (PB.x1 - appleSq.x) / dx);
+  else if (dx < -0.001) t = Math.min(t, (PB.x0 - appleSq.x) / dx);
+  if (dy > 0.001) t = Math.min(t, (SQ_Y1 - appleSq.y) / dy);
+  else if (dy < -0.001) t = Math.min(t, (PB.y0 - appleSq.y) / dy);
+  /* Honest distance — never inflate. Claiming more room than exists would
+     push the route off the board, where clamping flattens it into a line
+     that reads as overlapping road. */
+  return U.clamp(t, 60, 2600);
 }
 
-/* one complex route from `entry` to `apple` in a given style */
-function genPath(rng, entry, apple, style, intensity) {
-  const dx = apple.x - entry.x, dy = apple.y - entry.y;
-  const dist = Math.hypot(dx, dy) || 1;
-  const ux = dx / dist, uy = dy / dist;               /* toward apple */
-  const px = -uy, py = ux;                            /* perpendicular */
-  const pts = [{ x: entry.x, y: entry.y }];
+/* ---------------------------------------------------------------
+   A lane is generated in POLAR space around the apple: it sweeps
+   inward from the border (radius R -> 0) while its angle stays
+   locked inside its own wedge. Two lanes given disjoint wedges can
+   therefore never cross — they only meet at the apple itself.
+   The wiggle that makes a pattern "complex" is applied to the angle
+   INSIDE the wedge, so complexity never costs separation.
+   --------------------------------------------------------------- */
+function genLane(rng, appleSq, angMid, angHalf, style, intensity, roadW) {
   const I = intensity || 1;
+  /* Worst case two roads are separated purely vertically — the direction the
+     squash stretches by SQ — so budget the full SQ. That is what makes the
+     no-overlap property a guarantee rather than a hope. Complexity is bought
+     back by using narrower streets (see LANE_ROAD below), not by shaving
+     this margin. */
+  const RW = (roadW || 90) * SQ;
 
-  if (style === 'serpentine') {
-    const sweeps = 3 + (rng() * 2 | 0);
-    const amp = (130 + rng() * 120) * I;
-    for (let i = 1; i <= sweeps; i++) {
-      const t = i / (sweeps + 1);
-      const side = (i % 2 === 0) ? 1 : -1;
-      const a = amp * (0.55 + 0.45 * Math.sin(t * Math.PI));
-      pts.push(clampPt({ x: entry.x + dx * t + px * a * side, y: entry.y + dy * t + py * a * side }));
-    }
-  } else if (style === 'switchback') {
-    const zigs = 4 + (rng() * 2 | 0);
-    const amp = (150 + rng() * 100) * I;
-    for (let i = 1; i <= zigs; i++) {
-      const t = i / (zigs + 1);
-      const side = (i % 2 === 0) ? 1 : -1;
-      const cx = entry.x + dx * t, cy = entry.y + dy * t;
-      pts.push(clampPt({ x: cx + px * amp * side, y: cy + py * amp * side }));
-    }
-  } else if (style === 'spiral') {
-    const turns = 0.55 + rng() * 0.5;
-    const dir = rng() < 0.5 ? 1 : -1;
-    const steps = 8 + (rng() * 3 | 0);
-    const a0 = Math.atan2(entry.y - apple.y, entry.x - apple.x);
-    for (let i = 1; i <= steps; i++) {
-      const t = i / steps;
-      const r = dist * (1 - t * 0.80);
-      const ang = a0 + dir * turns * U.TAU * t;
-      pts.push(clampPt({ x: apple.x + Math.cos(ang) * r, y: apple.y + Math.sin(ang) * r }));
-    }
-  } else if (style === 'horseshoe') {
-    /* big loop out to one side then back across to the apple */
-    const side = rng() < 0.5 ? 1 : -1;
-    const amp = (200 + rng() * 130) * I;
-    [0.2, 0.38, 0.56, 0.74].forEach(t => {
-      const bulge = amp * Math.sin(t * Math.PI);
-      const s2 = (t < 0.5) ? side : -side * 0.6;
-      pts.push(clampPt({ x: entry.x + dx * t + px * bulge * s2, y: entry.y + dy * t + py * bulge * s2 }));
-    });
-  } else { /* meander */
-    const steps = 5 + (rng() * 3 | 0);
-    for (let i = 1; i <= steps; i++) {
-      const t = i / steps;
-      const cx = entry.x + dx * t, cy = entry.y + dy * t;
-      const j = (150 * (1 - t * 0.4)) * I;
-      const off = (rng() * 0.55 + 0.45) * (rng() < 0.5 ? 1 : -1);
-      pts.push(clampPt({ x: cx + px * j * off, y: cy + py * j * off }));
-    }
+  /* The wedge may point at a near edge, so take the most restrictive reach
+     across the whole wedge — otherwise the far side of a sweep would run off
+     the board and get clamped into a flat, ugly line. */
+  let R = Infinity;
+  for (let k = -3; k <= 3; k++) R = Math.min(R, reachToEdge(appleSq, angMid + angHalf * (k / 3)));
+
+  /* Keep clear air between neighbouring lanes: give up a slice of the wedge.
+     Capped at ~63 degrees so a single-lane level can't wrap onto itself. */
+  const wantGap = RW * 1.7;
+  const minKeep = U.clamp(wantGap / Math.max(240, R * 0.5), 0.20, 0.58);
+  const half = Math.min(1.1, Math.max(0.05, angHalf * (1 - minKeep)));
+
+  /* Fine detail that never doubles back: a small oscillation whose arc stays
+     well under the band spacing, so it adds shape without touching itself. */
+  const wig = 2 + (rng() * 3 | 0);
+  const wigPhase = rng() * U.TAU;
+  const dir = rng() < 0.5 ? 1 : -1;
+  const lean = (rng() - 0.5) * 0.18;
+
+  /* how much of the wedge each sweep actually uses, per style */
+  let reach = 1, sharp = 1;
+  if (style === 'switchback') { reach = 1.00; sharp = 1.9; }   /* hard corners */
+  else if (style === 'serpentine') { reach = 0.95; sharp = 1.0; }
+  else if (style === 'spiral') { reach = 0.80; sharp = 0.7; }  /* lazy curves */
+  else if (style === 'horseshoe') { reach = 1.00; sharp = 0.8; }
+  else { reach = 0.88; sharp = 1.25; }                          /* meander */
+
+  /* BOUSTROPHEDON: sweep across the wedge, step inward, sweep back — the
+     way you mow a lawn. Each sweep lives in its own radius band, so the road
+     can never land on itself, and every sweep is pure added distance.
+
+     A wedge pointing at a nearby board edge has a small R, and would walk as
+     a near-straight sprint to the apple — barely any exposure to the guns,
+     which is what made the odd lane feel like a free goal. Those lanes get
+     wound harder instead, so every route takes a comparable time to walk.
+     The cap keeps consecutive sweeps ~1.6 roads apart, which is what makes
+     the no-self-overlap property hold. */
+  const TARGET_RUN = 2300 * SQ;
+  const arcPerBand = Math.max(1, half * reach * R);
+  const needBands = Math.ceil((TARGET_RUN - R) / arcPerBand);
+  const roomBands = Math.floor(R / (RW * 2.5));
+  const bandCap = U.clamp(Math.floor(R / (RW * 1.6)), 1, 7);
+  const bands = U.clamp(Math.max(needBands, roomBands), 1, bandCap);
+
+  const steps = Math.max(40, bands * 16);
+  const pts = [];
+  let prevR = Infinity;
+
+  for (let i = 0; i <= steps; i++) {
+    const t = i / steps;                        /* 0 at border, 1 at apple */
+
+    /* which sweep are we on, and how far through it */
+    const bf = t * bands;
+    const k = Math.min(bands - 1, Math.floor(bf));
+    let u = bf - k;
+    /* Sweep at a near-constant angular rate. A heavily eased turn lingers at
+       the wedge edge, which makes the two legs of the hairpin hug each other;
+       staying close to linear means they separate by the full band spacing.
+       Catmull-Rom smoothing rounds the corner afterwards. */
+    const uSmooth = 0.5 - 0.5 * Math.cos(Math.pow(u, 1 / sharp) * Math.PI);
+    u = u * 0.72 + uSmooth * 0.28;
+    const from = (k % 2 === 0) ? -dir : dir;
+    const side = from * (1 - 2 * u);            /* sweeps from one edge to the other */
+
+    /* Near the apple the radius is tiny, so a wide angle would smear the
+       road over itself — cap the swing so its arc never exceeds a lane.
+       Sized off the conservative radius, since the angle is chosen first. */
+    const rNom = R * (1 - t);
+    const maxArc = Math.max(RW * 0.9, (R / bands) * 0.75);
+    const safeHalf = Math.min(half, rNom > 1 ? maxArc / rNom : half);
+
+    /* Wiggle amplitude in radians. Two neighbouring sweeps can each bulge
+       toward the other, so the budget here is HALF the clearance we want to
+       keep between them — at 0.55 the pair ate 1.1 roads of the ~1.6-road
+       band spacing and the lane brushed itself. */
+    const wigAmp = (rNom > 1 ? Math.min(safeHalf * 0.16, (RW * 0.26) / rNom) : 0)
+                 * Math.sin(t * Math.PI);          /* fades out at both ends */
+    const ang = angMid + (side * reach * I + lean) * safeHalf
+              + Math.sin(wigPhase + t * Math.PI * 2 * wig) * wigAmp;
+
+    /* Reach toward the real edge in THIS direction so the route uses the
+       corners instead of hugging a circle — but never let the radius grow,
+       or the road could double back onto a stretch it already covered. */
+    const edge = reachToEdge(appleSq, ang);
+    const rTarget = Math.min(edge, R + (edge - R) * 0.8) * (1 - t);
+    /* The radius must keep falling at close to the nominal rate. If it were
+       merely "non-increasing" the route could stall at one radius and a
+       hairpin would retrace the stretch it just covered. */
+    const r = Math.min(rTarget, prevR - (R / steps) * 0.85);
+    prevR = r;
+
+    /* built in squashed space, mapped back to the real board */
+    pts.push(clampPt(fromSq({ x: appleSq.x + Math.cos(ang) * r, y: appleSq.y + Math.sin(ang) * r })));
   }
-  pts.push({ x: apple.x, y: apple.y });
+  pts[pts.length - 1] = fromSq({ x: appleSq.x, y: appleSq.y });
   return pts;
 }
 
@@ -413,18 +482,50 @@ function buildRoutes(cfg, coop) {
   const nLanes = coop ? 4 : soloLanes;
   const rng = U.rng(cfg.buildSeed * 131 + (coop ? 90001 : 0));
   const style = PATH_STYLES[cfg.buildSeed % PATH_STYLES.length];
-  const intensity = coop ? 1.15 : 1.0;                /* co-op routes wind harder */
-  const entries = genEntries(rng, rawApple, nLanes);
-  return { apple: rawApple, nLanes, rawPaths: entries.map(e => genPath(rng, e, rawApple, style, intensity)) };
+  const intensity = coop ? 1.12 : 1.0;
+
+  /* Split the full circle into one exclusive wedge per lane. Disjoint
+     wedges is what guarantees the routes never overlap.
+     Rotate the whole set to whichever offset gives the SHORTEST lane the
+     most room — otherwise a wedge aimed at a nearby edge becomes a stub. */
+  const wedge = U.TAU / nLanes;
+  /* Keep the apple far enough inside that every wedge has usable room. The
+     more lanes there are the closer to dead centre it has to sit: with four
+     wedges covering the full circle, an off-centre apple forces at least one
+     of them to point at a near edge and that lane becomes a short sprint. */
+  const cx = (PB.x0 + PB.x1) / 2, cy = (PB.y0 + PB.y1) / 2;
+  const pull = U.clamp((nLanes - 1) * 0.22, 0, 0.66);
+  const appleSq = toSq({
+    x: U.clamp(rawApple.x + (cx - rawApple.x) * pull, PB.x0 + 320, PB.x1 - 320),
+    y: U.clamp(rawApple.y + (cy - rawApple.y) * pull, PB.y0 + 150, PB.y1 - 150)
+  });
+
+  const jitter = rng();
+  let a0 = 0, bestScore = -Infinity;
+  for (let s = 0; s < 32; s++) {
+    const cand = (s + jitter) * (wedge / 32);
+    let worst = Infinity;
+    for (let i = 0; i < nLanes; i++) worst = Math.min(worst, reachToEdge(appleSq, cand + wedge * (i + 0.5)));
+    if (worst > bestScore) { bestScore = worst; a0 = cand; }
+  }
+
+  const rawPaths = [];
+  for (let i = 0; i < nLanes; i++) {
+    const mid = a0 + wedge * (i + 0.5);
+    rawPaths.push(genLane(rng, appleSq, mid, wedge / 2, style, intensity, raw.roadW * LANE_ROAD));
+  }
+  return { apple: fromSq(appleSq), nLanes, rawPaths };
 }
 
 /* Layouts are authored against a 1600x900 board and scaled to the current
    world size on load. Raw coords are kept so a level can be rebuilt spatially
    without losing the original geometry. */
 function mkLevel(cfg) {
-  /* extra lanes mean extra opening capital and a little more slack */
-  cfg.gold += (cfg.paths.length - 1) * 150;
-  cfg.lives += (cfg.paths.length - 1) * 3;
+  /* Base economy before any lane bonus. The bonus is applied in rescale()
+     from the ACTUAL lane count, because co-op runs four lanes and would
+     otherwise be funded as if it only had the solo one or two. */
+  cfg._baseGold = cfg.gold;
+  cfg._baseLives = cfg.lives;
 
   /* size-independent, computed once */
   cfg.waves = makeWaves(cfg.id, cfg.waveCount, cfg.pool, cfg.boss, { paths: cfg.paths.length });
@@ -462,6 +563,10 @@ function mkLevel(cfg) {
     /* waves depend on the lane count, so rebuild them (deterministic per seed) */
     cfg.waves = makeWaves(cfg.id, cfg.waveCount, cfg.pool, cfg.boss, { paths: routes.nLanes });
 
+    /* more lanes to cover = more opening capital and a little more slack */
+    cfg.gold = cfg._baseGold + (routes.nLanes - 1) * 170;
+    cfg.lives = cfg._baseLives + (routes.nLanes - 1) * 4;
+
     cfg.landmark = raw.landmark ? Object.assign({}, raw.landmark, {
       x: raw.landmark.x * sx, y: raw.landmark.y * sy,
       s: (raw.landmark.s || 1) * s, clear: (raw.landmark.clear || 260) * s
@@ -473,7 +578,7 @@ function mkLevel(cfg) {
     }));
     cfg.lights = raw.lights.map(l => Object.assign({}, l, { x: l.x * sx, y: l.y * sy, r: (l.r || 130) * s }));
     cfg.keepClear = raw.keepClear.map(k => Object.assign({}, k, { x: k.x * sx, y: k.y * sy, r: k.r * s }));
-    cfg.roadW = Math.round(raw.roadW * s);
+    cfg.roadW = Math.round(raw.roadW * LANE_ROAD * s);
     cfg.cityDensity = Math.round(raw.density * sx * sy * 0.82);
     cfg.mask = null;                    /* force a re-bake of the placement grid */
   };

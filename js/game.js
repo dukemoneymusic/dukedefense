@@ -157,7 +157,10 @@ const Game = (() => {
       maxHp: def.hp * hpMul, hp: def.hp * hpMul,
       baseSpd: def.spd * spdMul, spd: def.spd * spdMul,
       baseArmor: def.armor, armor: def.armor,
-      bounty: Math.round(def.bounty * (1 + (hpMul - 1) * .32)),
+      /* Bounty has to track hpMul closely or the economy falls behind the
+         difficulty curve and late districts become unwinnable rather than
+         hard. Kept just under 1:1 so each district still tightens. */
+      bounty: Math.round(def.bounty * (1 + (hpMul - 1) * .70)),
       bite: def.bite, boss: !!def.boss, alive: true,
       slowT: 0, slowAmt: 0, burnT: 0, burnDps: 0, stunT: 0, frozen: 0,
       shredT: 0, shred: 0, hitFlash: 0, healT: 0, spawnT: 0, raged: false,
