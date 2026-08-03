@@ -34,7 +34,23 @@ const Game = (() => {
     L.rescale({ coop: !!opts.coop });
 
     const steps = [
-      () => { G = fresh(L, opts); onProgress(.05, 'SURVEYING THE GROUND'); },
+      () => {
+        G = fresh(L, opts);
+        /* Everyone opens with the same funds, held separately. L.gold is the
+           whole district's opening budget and was tuned as ONE purse, so a
+           squad divides it rather than each drawing it in full — with a
+           margin back, because four separate purses cannot be pooled to
+           cover a single emergency the way one wallet could. */
+        const squad = Math.max(1, Object.keys(G.peers).length);
+        const opening = squad > 1 ? Math.round(L.gold / squad * 1.6) : L.gold;
+        Object.keys(G.peers).forEach(id => {
+          G.wallets[id] = opening;
+          G.cds[id] = { plow: 0, freeze: 0, blast: 0 };
+        });
+        if (G.wallets[G.selfId] === undefined) G.wallets[G.selfId] = opening;
+        if (G.cds[G.selfId] === undefined) G.cds[G.selfId] = { plow: 0, freeze: 0, blast: 0 };
+        onProgress(.05, 'SURVEYING THE GROUND');
+      },
       () => {
         const baked = ART.bake(L, p => onProgress(.05 + p * .55, 'BUILDING THE DISTRICT'));
         G.bg = baked.ground;
@@ -72,7 +88,13 @@ const Game = (() => {
       bg: null, lights: null, glow: null, decals: null, decalsCtx: null,
       enemies: [], towers: [], projectiles: [], particles: [], floats: [], pickups: [],
 
-      gold: L.gold, lives: L.lives, maxLives: L.lives,
+      /* One purse per player. `gold` is a view onto YOUR purse, so every
+         read in the HUD and the build checks stays about you, while the
+         host simulates all four wallets independently. */
+      wallets: {},
+      get gold() { return this.wallets[this.selfId] || 0; },
+      set gold(v) { this.wallets[this.selfId] = v; },
+      lives: L.lives, maxLives: L.lives,
       waveIdx: 0, wavesSent: 0, totalWaves: L.waves.length,
       spawnQueue: [], waveTimer: L.waves[0].prep,
       state: 'prep',
@@ -80,7 +102,10 @@ const Game = (() => {
       time: 0, realTime: 0, tick: 0,
 
       stats: { kills: 0, gold: 0, leaks: 0, sidearmKills: 0, grabbed: 0 },
-      cd: { plow: 0, freeze: 0, blast: 0 },
+      /* one set of ability cooldowns per player, same as the purses —
+         `cd` is the view onto yours so the HUD stays about you */
+      cds: {},
+      get cd() { return this.cds[this.selfId] || (this.cds[this.selfId] = { plow: 0, freeze: 0, blast: 0 }); },
       freezeT: 0, plowT: 0, ammoBoost: 0,
       appleFlash: 0, lightning: 0, lightningT: 4 + Math.random() * 8,
       wind: L.weather === 'rain' ? -1.4 : (L.weather === 'snow' ? .5 : .2),
@@ -111,6 +136,24 @@ const Game = (() => {
   const emit = (type, data) => { if (G && G.onEvent) G.onEvent(type, data); };
   const isClient = () => G.netRole === 'client';
 
+  /* ---- per-player purses ------------------------------------
+     In co-op nothing is pooled: you spend what you earned. An id we have
+     never seen (a late joiner, a stray command) falls back to the local
+     purse rather than silently minting money into a new one. */
+  const walletId = id => (id && G.wallets[id] !== undefined) ? id : G.selfId;
+  const purse    = id => G.wallets[walletId(id)] || 0;
+  const credit   = (id, amt) => { const k = walletId(id); G.wallets[k] = (G.wallets[k] || 0) + amt; };
+  const debit    = (id, amt) => credit(id, -amt);
+  /* Income nobody can be credited for individually (wave clear, early-send
+     bonus). It is SPLIT, not handed to each player in full — paying it four
+     times over would quadruple the squad's income and undo the difficulty.
+     Per-kill bounties are what scale co-op earnings, and those already do. */
+  const creditShared = amt => {
+    const ids = Object.keys(G.wallets);
+    const each = amt / Math.max(1, ids.length);
+    ids.forEach(id => { G.wallets[id] += each; });
+  };
+
   /* ==========================================================
      COMMANDS — the only way state ever changes
      ========================================================== */
@@ -125,9 +168,9 @@ const Game = (() => {
   function apply(c) {
     switch (c.t) {
       case 'build': doBuild(c.x, c.y, c.type, c.by); break;
-      case 'up':    doUpgrade(byId(c.id)); break;
-      case 'sell':  doSell(byId(c.id)); break;
-      case 'mode':  { const tw = byId(c.id); if (tw) tw.mode = c.mode; break; }
+      case 'up':    doUpgrade(byId(c.id), c.by); break;
+      case 'sell':  doSell(byId(c.id), c.by); break;
+      case 'mode':  { const tw = byId(c.id); if (tw && !(G.coop && c.by && tw.owner !== c.by)) tw.mode = c.mode; break; }
       case 'ab':    doAbility(c.name, c.x !== undefined ? { x: c.x, y: c.y } : null, c.by); break;
       case 'shoot': doShoot(c.x, c.y, c.by, c.tol); break;
       case 'grab':  doGrab(c.id, c.by); break;
@@ -240,16 +283,17 @@ const Game = (() => {
       Audio2.play('boss');
       toast(ENEMIES[e.type].name + ' IS ENRAGED', 'bad');
     }
-    if (e.hp <= 0) kill(e, opts.by);
+    if (e.hp <= 0) kill(e, opts.by, !!opts.sidearm);
     return dmg;
   }
 
-  function kill(e, by) {
+  function kill(e, by, viaSidearm) {
     if (!e.alive) return;
     e.alive = false;
-    const pay = Math.round(e.bounty * (by === 'sidearm' ? 1.25 : 1));
-    G.gold += pay; G.stats.gold += pay; G.stats.kills++;
-    if (by === 'sidearm') G.stats.sidearmKills++;
+    const pay = Math.round(e.bounty * (viaSidearm ? 1.25 : 1));
+    credit(by, pay);
+    G.stats.gold += pay; G.stats.kills++;
+    if (viaSidearm) G.stats.sidearmKills++;
     float(e.x, e.y - e.r - 10, '+' + pay, '#ffc21a', e.boss ? 24 : 13);
 
     if (e.def.fly) burst(e.x, e.y - (e.fly ? 28 : 0), 12, e.col, 'feather');
@@ -288,8 +332,16 @@ const Game = (() => {
     emit('bite', e);
     float(G.level.base.x, G.level.base.y - 80, '-' + e.bite, '#ff5566', 22);
     if (e.def.steal) {
-      const stolen = Math.min(G.gold, e.def.steal);
-      G.gold -= stolen;
+      /* it robs the till at the apple, so the loss is shared out rather
+         than landing on whichever wallet happens to be looking */
+      const ids = Object.keys(G.wallets);
+      const each = e.def.steal / Math.max(1, ids.length);
+      let stolen = 0;
+      ids.forEach(id => {
+        const take = Math.min(G.wallets[id], Math.round(each));
+        G.wallets[id] -= take;
+        if (id === G.selfId) stolen = take;
+      });
       if (stolen > 0) float(G.level.base.x + 40, G.level.base.y - 50, '-$' + stolen, '#ff8a3a', 15);
     }
     if (G.lives <= 0) { G.lives = 0; lose(); }
@@ -318,7 +370,7 @@ const Game = (() => {
     G.stats.grabbed++;
 
     if (p.kind === 'cash') {
-      G.gold += p.value; G.stats.gold += p.value;
+      credit(by, p.value); G.stats.gold += p.value;
       float(p.x, p.y - 26, '+' + U.fmtMoney(p.value), '#ffc21a', 19);
       Audio2.play('coin');
     } else if (p.kind === 'medkit') {
@@ -353,7 +405,7 @@ const Game = (() => {
     Audio2.play('pistol', 40);
     const from = { x: G.level.base.x, y: G.level.base.y - 60 };
     G.particles.push({ kind: 'tracer', x: from.x, y: from.y, x2: wx, y2: wy, r: 2, col: U.rgba(255, 220, 140, .8), t: 0, life: .1 });
-    if (best) { damage(best, G.sidearmDmg, 'ball', { by: 'sidearm' }); burst(wx, wy, 6, '#ffe6a0', 'spark'); }
+    if (best) { damage(best, G.sidearmDmg, 'ball', { by, sidearm: true }); burst(wx, wy, 6, '#ffe6a0', 'spark'); }
     else burst(wx, wy, 4, '#8e99b0', 'smoke');
   }
 
@@ -376,9 +428,9 @@ const Game = (() => {
     if (!def) return null;
     const cost = def.tiers[0].cost;
     const mine = owner === G.selfId;
-    if (G.gold < cost) { if (mine) { Audio2.play('error'); toast('INSUFFICIENT FUNDS', 'bad'); } return null; }
+    if (purse(owner) < cost) { if (mine) { Audio2.play('error'); toast('INSUFFICIENT FUNDS', 'bad'); } return null; }
     if (!placementOk(x, y, type)) { if (mine) { Audio2.play('error'); toast('NO CLEAR GROUND', 'bad'); } return null; }
-    G.gold -= cost;
+    debit(owner, cost);
 
     const t = {
       id: uid++, type, def, owner: owner || G.selfId,
@@ -395,12 +447,18 @@ const Game = (() => {
 
   function upgradeCost(t) { return (!t || t.tier >= 2) ? null : t.def.tiers[t.tier + 1].cost; }
 
-  function doUpgrade(t) {
+  function doUpgrade(t, by) {
     if (!t) return false;
     const c = upgradeCost(t);
     if (c === null) return false;
-    if (G.gold < c) { Audio2.play('error'); toast('INSUFFICIENT FUNDS', 'bad'); return false; }
-    G.gold -= c; t.invested += c; t.tier++;
+    const mine = by === G.selfId;
+    /* your kit is yours — nobody else spends on it or scraps it */
+    if (G.coop && by && t.owner !== by) {
+      if (mine) { Audio2.play('error'); toast('NOT YOUR WEAPON', 'bad'); }
+      return false;
+    }
+    if (purse(by) < c) { if (mine) { Audio2.play('error'); toast('INSUFFICIENT FUNDS', 'bad'); } return false; }
+    debit(by, c); t.invested += c; t.tier++;
     Audio2.play('upgrade');
     burst(t.x, t.y, 22, t.def.col, 'spark');
     ring(t.x, t.y, 84, t.def.col);
@@ -408,10 +466,14 @@ const Game = (() => {
     return true;
   }
 
-  function doSell(t) {
+  function doSell(t, by) {
     if (!t) return 0;
+    if (G.coop && by && t.owner !== by) {
+      if (by === G.selfId) { Audio2.play('error'); toast('NOT YOUR WEAPON', 'bad'); }
+      return 0;
+    }
     const back = Math.floor(t.invested * .7);
-    G.gold += back;
+    credit(t.owner, back);
     const i = G.towers.indexOf(t);
     if (i >= 0) G.towers.splice(i, 1);
     Audio2.play('sell');
@@ -482,6 +544,8 @@ const Game = (() => {
     const s = stat(t);
     const def = t.def;
     const tx = t.x, ty = t.y - 14;
+    /* every casualty this weapon causes is banked by whoever emplaced it */
+    const by = t.owner;
     t.aim = Math.atan2((target.y - (target.fly ? 28 : 0)) - ty, target.x - tx);
 
     switch (def.proj) {
@@ -498,7 +562,7 @@ const Game = (() => {
             vx: Math.cos(a) * s.speed, vy: Math.sin(a) * s.speed,
             dmg: s.dmg * (s.ramp ? U.lerp(1, s.ramp, t.charge) : 1),
             dtype: def.dtype, crit,
-            opts: { big: !!crit || def.dtype === 'ap', crit },
+            opts: { big: !!crit || def.dtype === 'ap', crit, by },
             target, homing: def.dtype === 'ap' ? 0 : .06, life: 2.2,
             pierce: s.pierce || 0, hitIds: null,
             tracer: def.dtype === 'ap' ? 40 : 16,
@@ -526,7 +590,7 @@ const Game = (() => {
           if (d > range) continue;
           if (Math.abs(U.angDiff(base, Math.atan2(e.y - ty, e.x - tx))) > s.spread / 2 + .12) continue;
           const falloff = U.lerp(1, .42, d / range);
-          damage(e, s.dmg * falloff, def.dtype, { big: true });
+          damage(e, s.dmg * falloff, def.dtype, { big: true, by });
           if (e.alive) {
             e.d = Math.max(0, e.d - s.push * falloff);
             if (s.stun) applyStun(e, s.stun);
@@ -543,7 +607,7 @@ const Game = (() => {
           x0: tx, y0: ty - 10, x1: p.x, y1: p.y,
           x: tx, y: ty - 10, gx: tx, gy: t.y,
           t: 0, dur: U.clamp(U.dist(tx, ty, p.x, p.y) / s.speed, .25, 1.5), spin: 0,
-          dmg: s.dmg, dtype: def.dtype, splash: s.splash, burn: s.burn, opts: { big: true }
+          dmg: s.dmg, dtype: def.dtype, splash: s.splash, burn: s.burn, opts: { big: true, by }
         });
         break;
       }
@@ -555,7 +619,7 @@ const Game = (() => {
           x0: p.x, y0: p.y - 460, x1: p.x, y1: p.y,
           x: p.x, y: p.y - 460, gx: p.x, gy: p.y,
           t: 0, dur: .85, spin: 0,
-          dmg: s.dmg, dtype: def.dtype, splash: s.splash, stun: s.stun, opts: { big: true }
+          dmg: s.dmg, dtype: def.dtype, splash: s.splash, stun: s.stun, opts: { big: true, by }
         });
         break;
       }
@@ -569,14 +633,14 @@ const Game = (() => {
             vx: Math.cos(a) * s.speed * .55, vy: Math.sin(a) * s.speed * .55,
             maxSpeed: s.speed,
             dmg: s.dmg, dtype: def.dtype, splash: s.splash,
-            opts: { big: true }, target, homing: 1.0, life: 4, smokeT: 0
+            opts: { big: true, by }, target, homing: 1.0, life: 4, smokeT: 0
           });
         }
         break;
       }
 
       case 'wave': {
-        areaHit(tx, t.y, s.splash, s.dmg, def.dtype, { slow: s.slow, slowT: s.slowT, shred: s.shred });
+        areaHit(tx, t.y, s.splash, s.dmg, def.dtype, { slow: s.slow, slowT: s.slowT, shred: s.shred, by });
         ring(t.x, t.y, s.splash, '#7fd0ff');
         for (let k = 0; k < 14; k++) {
           const a = G.rng() * U.TAU, sp = 60 + G.rng() * 140;
@@ -597,7 +661,7 @@ const Game = (() => {
         for (let k = 0; k < s.chain; k++) {
           const cy = cur.y - (cur.fly ? 28 : 0);
           G.particles.push({ kind: 'arc', x: fromX, y: fromY, x2: cur.x, y2: cy, r: 2, col: U.rgba(190, 170, 255, .9), t: 0, life: .16 });
-          damage(cur, dmg, def.dtype, { big: k === 0 });
+          damage(cur, dmg, def.dtype, { big: k === 0, by });
           if (cur.alive && G.rng() < s.stunChance) applyStun(cur, s.stun);
           fromX = cur.x; fromY = cy;
           dmg *= s.falloff;
@@ -653,7 +717,7 @@ const Game = (() => {
       hits++;
       if (!e.alive) continue;
       if (o.slow) applySlow(e, o.slow, o.slowT);
-      if (o.burn) applyBurn(e, o.burn, o.burnT || 3);
+      if (o.burn) applyBurn(e, o.burn, o.burnT || 3, o.by);
       if (o.shred) applyShred(e, o.shred);
       if (o.stun && (!o.stunChance || G.rng() < o.stunChance)) applyStun(e, o.stun);
       if (o.push) e.d = Math.max(0, e.d - o.push);
@@ -666,7 +730,11 @@ const Game = (() => {
     if (amt >= e.slowAmt || e.slowT <= 0) e.slowAmt = amt;
     e.slowT = Math.max(e.slowT, dur);
   }
-  function applyBurn(e, dps, dur) { e.burnDps = Math.max(e.burnDps, dps); e.burnT = Math.max(e.burnT, dur); }
+  /* remember who lit it so the burn ticks bank to the right purse */
+  function applyBurn(e, dps, dur, by) {
+    if (dps >= e.burnDps && by) e.burnBy = by;
+    e.burnDps = Math.max(e.burnDps, dps); e.burnT = Math.max(e.burnT, dur);
+  }
   function applyStun(e, dur) { if (e.boss) dur *= .35; e.stunT = Math.max(e.stunT, dur); }
   function applyShred(e, amt) { e.shred = Math.min(e.baseArmor, e.shred + amt); e.shredT = 4; }
 
@@ -740,7 +808,9 @@ const Game = (() => {
      FIELD SUPPORT
      ========================================================== */
   function doAbility(name, aim, by) {
-    if (G.cd[name] > 0) return false;
+    /* your support kit runs on your own clock, not the squad's */
+    const cd = G.cds[walletId(by)] || G.cd;
+    if (cd[name] > 0) return false;
     const A = ABILITIES[name];
 
     if (name === 'plow') {
@@ -755,13 +825,13 @@ const Game = (() => {
       toast('CRYO BURST', 'good'); shake(.35);
     } else if (name === 'blast' && aim) {
       const R = A.radius * G.wscale;
-      const hits = areaHit(aim.x, aim.y, R, A.dmg, 'he', { stun: 1.2, stunChance: 1, big: true });
+      const hits = areaHit(aim.x, aim.y, R, A.dmg, 'he', { stun: 1.2, stunChance: 1, big: true, by });
       boom(aim.x, aim.y, R, '#ff9d2e');
       Audio2.play('boom'); Audio2.duckMusic(.35, 1.4); shake(1.0);
       if (hits === 0) toast('ROUNDS ON EMPTY GROUND', 'warn');
     } else return false;
 
-    G.cd[name] = A.cd;
+    cd[name] = A.cd;
     return true;
   }
 
@@ -798,7 +868,7 @@ const Game = (() => {
     if (manual) {
       const bonus = earlyBonus();
       if (bonus > 0) {
-        G.gold += bonus; G.stats.gold += bonus;
+        creditShared(bonus); G.stats.gold += bonus;
         float(G.level.base.x, G.level.base.y - 130, '+' + U.fmtMoney(bonus) + ' EARLY', '#3fdd8f', 17);
         Audio2.play('coin');
       }
@@ -857,7 +927,10 @@ const Game = (() => {
     const dt = Math.min(.05, rawDt) * G.speed;
     G.time += dt; G.realTime += rawDt; G.tick++;
 
-    for (const k in G.cd) if (G.cd[k] > 0) G.cd[k] = Math.max(0, G.cd[k] - dt);
+    for (const id in G.cds) {
+      const c = G.cds[id];
+      for (const k in c) if (c[k] > 0) c[k] = Math.max(0, c[k] - dt);
+    }
     if (G.freezeT > 0) G.freezeT -= dt;
     if (G.plowT > 0) G.plowT -= dt;
     if (G.ammoBoost > 0) G.ammoBoost -= dt;
@@ -901,7 +974,7 @@ const Game = (() => {
       if (w._paid) continue;
       if (waveCleared(i)) {
         w._paid = true;
-        G.gold += w.reward; G.stats.gold += w.reward;
+        creditShared(w.reward); G.stats.gold += w.reward;
         float(G.level.base.x, G.level.base.y - 150, '+' + U.fmtMoney(w.reward), '#3fdd8f', 18);
         Audio2.play('coin');
         emit('wavedone', i);
@@ -931,7 +1004,7 @@ const Game = (() => {
 
       if (e.burnT > 0) {
         e.burnT -= dt;
-        damage(e, e.burnDps * dt, 'incen', {});
+        damage(e, e.burnDps * dt, 'incen', { by: e.burnBy });
         if (!e.alive) { G.enemies.splice(i, 1); continue; }
         if (Math.random() < dt * 12) {
           G.particles.push({
@@ -998,9 +1071,9 @@ const Game = (() => {
             const d = U.dist(t.x, t.y - 10, e.x, e.y);
             if (d > s.range) continue;
             if (Math.abs(U.angDiff(t.aim, Math.atan2(e.y - (t.y - 10), e.x - t.x))) > s.arc / 2) continue;
-            damage(e, s.dps * rateBoost * dt, 'incen', {});
+            damage(e, s.dps * rateBoost * dt, 'incen', { by: t.owner });
             if (e.alive) {
-              applyBurn(e, s.burn, s.burnT);
+              applyBurn(e, s.burn, s.burnT, t.owner);
               if (s.shred) applyShred(e, s.shred * dt);
             }
           }
@@ -1042,7 +1115,8 @@ const Game = (() => {
         p.spin += dt * (p.drop ? 5 : 9);
         if (k >= 1) {
           areaHit(p.x1, p.y1, p.splash, p.dmg, p.dtype, {
-            burn: p.burn, burnT: 3, stun: p.stun, stunChance: p.stun ? 1 : 0, big: true
+            burn: p.burn, burnT: 3, stun: p.stun, stunChance: p.stun ? 1 : 0, big: true,
+            by: p.opts && p.opts.by
           });
           boom(p.x1, p.y1, p.splash, p.drop ? '#ffb02a' : '#ff9d2e');
           Audio2.play(p.drop ? 'boom' : 'thump', 60);
@@ -1087,7 +1161,7 @@ const Game = (() => {
       }
       if (hit) {
         if (p.splash) {
-          areaHit(p.x, p.y, p.splash, p.dmg, p.dtype, { big: true });
+          areaHit(p.x, p.y, p.splash, p.dmg, p.dtype, { big: true, by: p.opts && p.opts.by });
           boom(p.x, p.y, p.splash, '#ff9d2e');
           Audio2.play('boom', 70); shake(.3);
           G.projectiles.splice(i, 1);
@@ -1138,12 +1212,27 @@ const Game = (() => {
   /* ==========================================================
      NETPLAY — snapshots
      ========================================================== */
+  function roundWallets() {
+    const o = {};
+    for (const k in G.wallets) o[k] = Math.round(G.wallets[k]);
+    return o;
+  }
+
+  function roundCds() {
+    const o = {};
+    for (const id in G.cds) {
+      const c = G.cds[id];
+      o[id] = [+c.plow.toFixed(1), +c.freeze.toFixed(1), +c.blast.toFixed(1)];
+    }
+    return o;
+  }
+
   function makeSnapshot() {
     const snap = {
-      k: G.tick, g: Math.round(G.gold), l: G.lives,
+      k: G.tick, w: roundWallets(), l: G.lives,
       wi: G.waveIdx, ws: G.wavesSent, wt: +G.waveTimer.toFixed(2),
       st: G.state, sp: G.speed, tm: +G.time.toFixed(2),
-      cd: [+G.cd.plow.toFixed(1), +G.cd.freeze.toFixed(1), +G.cd.blast.toFixed(1)],
+      cd: roundCds(),
       fz: +G.freezeT.toFixed(2), ab: +G.ammoBoost.toFixed(1),
       e: G.enemies.map(e => [
         e.id, ENEMY_KEYS.indexOf(e.type), Math.round(e.x), Math.round(e.y),
@@ -1167,10 +1256,15 @@ const Game = (() => {
     if (!G) return;
     G.lerpT = 0;
 
-    G.gold = s.g; G.lives = s.l;
+    /* keep every purse: the HUD shows yours, the scoreboard shows theirs */
+    if (s.w) for (const k in s.w) G.wallets[k] = s.w[k];
+    G.lives = s.l;
     G.waveIdx = s.wi; G.wavesSent = s.ws; G.waveTimer = s.wt;
     G.speed = s.sp; G.time = s.tm; G.ammoBoost = s.ab; G.freezeT = s.fz;
-    G.cd.plow = s.cd[0]; G.cd.freeze = s.cd[1]; G.cd.blast = s.cd[2];
+    if (s.cd) for (const id in s.cd) {
+      const r = s.cd[id];
+      G.cds[id] = { plow: r[0], freeze: r[1], blast: r[2] };
+    }
 
     if (s.st !== G.state) {
       G.state = s.st;

@@ -365,6 +365,9 @@
     const AMMO = { ball: 'BALL', ap: 'ARMOUR PIERCING', buck: 'BUCKSHOT', he: 'HIGH EXPLOSIVE', incen: 'INCENDIARY', cryo: 'CRYOGENIC', energy: 'ENERGY' };
     const tg = { ground: 'GROUND ONLY', air: 'AIR ONLY', both: 'GROUND + AIR' }[t.def.targets];
     const dps = s.dps ? s.dps : Math.round(s.dmg * (s.rate || 1) * (s.multi || 1) * (s.pellets || 1));
+    /* in co-op you may inspect anyone's kit but only operate your own */
+    const mine = !G.coop || t.owner === G.selfId;
+    const ownerName = mine ? '' : ((G.peers[t.owner] && G.peers[t.owner].name) || 'SQUADMATE').toUpperCase();
 
     panel.innerHTML = `
       <div style="display:flex;align-items:center;gap:9px;margin-bottom:9px">
@@ -389,7 +392,7 @@
           <div style="font-size:10px;font-weight:800;margin-top:3px">${tg}</div></div>
       </div>
       <div style="font-size:7.5px;letter-spacing:.16em;color:#64708a;margin-bottom:5px">TARGET PRIORITY</div>
-      <div id="tp-modes" style="display:flex;gap:4px;margin-bottom:10px">
+      <div id="tp-modes" style="display:flex;gap:4px;margin-bottom:10px;${mine ? '' : 'opacity:.4;pointer-events:none'}">
         ${['first', 'last', 'strong', 'close'].map(m => `
           <button data-m="${m}" style="flex:1;height:26px;border-radius:6px;cursor:pointer;
             border:1px solid ${t.mode === m ? '#ffc21a' : '#2a3448'};
@@ -397,7 +400,10 @@
             color:${t.mode === m ? '#ffc21a' : '#8e99b0'};
             font:800 8px/1 Helvetica,Arial;letter-spacing:.08em">${m.toUpperCase()}</button>`).join('')}
       </div>
-      ${nxt ? `
+      ${!mine ? `
+        <div style="text-align:center;font:900 9px/1.5 Helvetica,Arial;letter-spacing:.18em;color:#64708a;padding:12px 0 4px">
+          ${ownerName}'S WEAPON<br><span style="font-size:8px;letter-spacing:.12em;color:#4a5468">ONLY THEY CAN UPGRADE OR SELL IT</span>
+        </div>` : nxt ? `
         <button id="tp-up" style="width:100%;height:44px;border-radius:9px;margin-bottom:7px;cursor:pointer;
           border:1px solid ${G.gold >= up ? '#8a6410' : '#3a2f18'};
           background:${G.gold >= up ? 'linear-gradient(180deg,#ffd257,#e0a30a)' : '#232a35'};
@@ -406,9 +412,9 @@
           UPGRADE &rarr; ${nxt.label}<br><span style="font-size:9px">${U.fmtMoney(up)}</span>
         </button>` : `
         <div style="text-align:center;font:900 9px/1 Helvetica,Arial;letter-spacing:.22em;color:#3fdd8f;padding:12px 0 10px">MAXIMUM TIER</div>`}
-      <button id="tp-sell" style="width:100%;height:30px;border-radius:8px;cursor:pointer;
+      ${mine ? `<button id="tp-sell" style="width:100%;height:30px;border-radius:8px;cursor:pointer;
         border:1px solid #4a2028;background:transparent;color:#ff8a95;
-        font:800 9px/1 Helvetica,Arial;letter-spacing:.14em">SELL &middot; +${U.fmtMoney(sellFor)}</button>`;
+        font:800 9px/1 Helvetica,Arial;letter-spacing:.14em">SELL &middot; +${U.fmtMoney(sellFor)}</button>` : ''}`;
 
     panel.querySelectorAll('#tp-modes button').forEach(b => {
       b.onclick = ev => {
@@ -423,7 +429,8 @@
       Game.cmd({ t: 'up', id: t.id });
       setTimeout(() => { if (G && G.towers.includes(t)) showPanel(t); }, 60);
     };
-    panel.querySelector('#tp-sell').onclick = ev => {
+    const sellBtn = panel.querySelector('#tp-sell');
+    if (sellBtn) sellBtn.onclick = ev => {
       ev.stopPropagation();
       Game.cmd({ t: 'sell', id: t.id });
       hidePanel(); G.ui.selected = null; G.ui.rangePreview = null;
@@ -689,6 +696,7 @@
     }
     $('#hud-wave').textContent =
       `${Math.min(Math.max(1, G.wavesSent + (G.state === 'prep' ? 1 : 0)), G.totalWaves)} / ${G.totalWaves}`;
+    syncSquadCash();
 
     const btn = $('#btn-next');
     const canSend = !coopMode || Net.isHost;
@@ -737,9 +745,29 @@
       const p = G.peers[id];
       const el = document.createElement('div');
       el.className = 'sq' + (p.host ? ' host' : '');
-      el.innerHTML = `<i style="background:${p.col}"></i>${p.name}`;
+      el.dataset.pid = id;
+      /* each purse is that player's alone, so show it next to their name */
+      el.innerHTML = `<i style="background:${p.col}"></i>${p.name}` +
+        `<b class="sq-cash" style="margin-left:6px;color:#ffc21a;font-weight:800">$0</b>` +
+        `<b class="sq-guns" style="margin-left:5px;color:#64708a;font-weight:700">0</b>`;
       box.appendChild(el);
     }
+    syncSquadCash();
+  }
+
+  /* cheap enough to run every frame — only touches text nodes that changed */
+  function syncSquadCash() {
+    if (!coopMode || !G) return;
+    const guns = {};
+    for (const t of G.towers) guns[t.owner] = (guns[t.owner] || 0) + 1;
+    $$('#squad .sq').forEach(el => {
+      const id = el.dataset.pid;
+      const cash = '$' + Math.round(G.wallets[id] || 0);
+      const n = String(guns[id] || 0);
+      const c = el.querySelector('.sq-cash'), g = el.querySelector('.sq-guns');
+      if (c && c.textContent !== cash) c.textContent = cash;
+      if (g && g.textContent !== n) g.textContent = n;
+    });
   }
 
   $$('.ability').forEach(b => {

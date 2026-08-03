@@ -1614,8 +1614,10 @@ const ART = (() => {
     (TEX[L.ground] || TEX.asphalt)(x, W, H, pal, L.buildSeed);
     onProgress && onProgress(.18);
 
-    /* ---- 2. the road is off limits, plus a curb margin ---- */
-    const roadClear = L.roadW * .5 + 26;
+    /* ---- 2. the road is off limits, plus a curb margin ----
+       Only as wide as the kerb actually looks. A fat invisible margin here
+       reads as "there is clearly room but the game says no". */
+    const roadClear = L.roadW * .5 + 12;
     L.builtPaths.forEach(bp => {
       for (let d = 0; d <= bp.length; d += CELL * .7) {
         const p = U.samplePath(bp, d);
@@ -1696,8 +1698,13 @@ const ART = (() => {
         escape: st === 'brick' && r() < .45,
         roof: r() < .3 ? 'water' : (r() < .5 ? 'ac' : (r() < .12 ? 'spire' : 'flat'))
       }, r);
-      /* the footprint, plus a little skirt, is unbuildable */
-      markRect(p.x, p.y, p.bw * .5 + 10, p.bd * .5 + 10);
+      /* Only the footprint the player can actually SEE is unbuildable.
+         Skyline pieces sit outside the board (px/py range past the edges)
+         purely as dressing — they used to stamp their footprint back onto
+         the playfield, which blocked wide strips of empty ground along the
+         borders for no visible reason. */
+      const onBoard = p.x > 0 && p.x < W && p.y > 0 && p.y < H;
+      if (onBoard) markRect(p.x, p.y, p.bw * .5 + 2, p.bd * .5 + 2);
       if (i % 12 === 0) onProgress && onProgress(.34 + .34 * (i / placed.length));
     });
     onProgress && onProgress(.7);
@@ -1767,7 +1774,7 @@ const ART = (() => {
     /* ---- 8. hard border: nothing may be built off the edge ---- */
     for (let gy = 0; gy < GH; gy++)
       for (let gx = 0; gx < GW; gx++)
-        if (gx < 2 || gy < 2 || gx >= GW - 2 || gy >= GH - 2) mask[gy * GW + gx] = 1;
+        if (gx < 1 || gy < 1 || gx >= GW - 1 || gy >= GH - 1) mask[gy * GW + gx] = 1;
 
     onProgress && onProgress(1);
     return { ground: g.c, mask, cell: CELL, gw: GW, gh: GH };
